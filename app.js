@@ -192,13 +192,34 @@ async function callGemini(prompt, { json = false } = {}) {
 }
 
 // Petit appel de validation de la clé (onboarding).
+// Renvoie { ok, status, reason }. On distingue clé invalide / quota / modèle indisponible.
 async function testerCle(key) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${getModel()}:generateContent?key=${encodeURIComponent(key)}`;
-  const res = await fetch(url, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ parts: [{ text: 'Réponds juste: ok' }] }] }),
-  });
-  return res.ok;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: 'Réponds juste: ok' }] }] }),
+    });
+  } catch (e) { return { ok: false, status: 0, reason: 'Réseau indisponible.' }; }
+  if (res.ok) return { ok: true, status: 200 };
+  let detail = '';
+  try { const j = await res.json(); detail = (j && j.error && j.error.message) || ''; } catch (e) {}
+  return { ok: false, status: res.status, reason: detail || ('HTTP ' + res.status) };
+}
+
+// Diagnostic : liste les modèles que la clé peut réellement utiliser (generateContent).
+async function listerModeles(key) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    let detail = ''; try { const j = await res.json(); detail = (j && j.error && j.error.message) || ''; } catch (e) {}
+    throw new Error(detail || ('HTTP ' + res.status));
+  }
+  const data = await res.json();
+  return (data.models || [])
+    .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map(m => (m.name || '').replace('models/', ''));
 }
 
 function construirePrompt(w) {
@@ -415,24 +436,54 @@ function renderKey() {
       </select>
       <p class="small muted mt">Si tu tombes sur « quota atteint », garde Flash-Lite : c'est le plus généreux en gratuit.</p>
       <button class="btn primary mt" id="key-save">Tester et enregistrer</button>
+      <button class="btn ghost mt" id="key-diag">🔍 Voir les modèles dispo pour ma clé</button>
       ${hasKey() ? '<button class="btn danger ghost mt" id="key-del">Supprimer ma clé</button>' : ''}
+      <div id="key-msg" class="small mt"></div>
       <p class="small muted mt">🔒 Ta clé reste sur cet appareil (stockage local du navigateur). Elle n'est jamais envoyée ailleurs qu'à Google.</p>
     </div>`;
 
   const input = document.getElementById('key-input');
+  const msg = document.getElementById('key-msg');
+  const showMsg = (html, color) => { msg.style.color = color || 'var(--txt-dim)'; msg.innerHTML = html; };
   document.getElementById('key-show').onchange = (e) => { input.type = e.target.checked ? 'text' : 'password'; };
   document.getElementById('model-sel').onchange = (e) => { setModel(e.target.value); };
+
   document.getElementById('key-save').onclick = async () => {
     const k = input.value.trim();
     if (k.length < 10) { toast('Clé trop courte.'); return; }
     const btn = document.getElementById('key-save');
-    btn.disabled = true; btn.textContent = 'Test en cours…';
-    try {
-      const ok = await testerCle(k);
-      if (ok) { setKey(k); toast('Clé valide et enregistrée ✅'); route = { name: route.back || 'home' }; render(); }
-      else { toast('Clé refusée par Google. Vérifie-la.'); btn.disabled = false; btn.textContent = 'Tester et enregistrer'; }
-    } catch (e) { toast('Impossible de tester (réseau ?).'); btn.disabled = false; btn.textContent = 'Tester et enregistrer'; }
+    btn.disabled = true; btn.textContent = 'Test en cours…'; showMsg('');
+    const r = await testerCle(k);
+    btn.disabled = false; btn.textContent = 'Tester et enregistrer';
+    if (r.ok) {
+      setKey(k); toast('Clé valide et enregistrée ✅'); route = { name: route.back || 'home' }; render();
+    } else if (r.status === 429) {
+      // Clé VALIDE mais limite/quota atteint : on autorise l'enregistrement.
+      setKey(k);
+      showMsg('⚠️ Clé enregistrée, mais le quota du modèle « ' + getModel() + ' » est atteint maintenant.<br>Réponse de Google : <i>' + esc(r.reason) + '</i><br>Attends quelques minutes, ou utilise le diagnostic ci-dessous pour choisir un autre modèle.', 'var(--warn)');
+    } else if (r.status === 400 || r.status === 403) {
+      showMsg('❌ Clé refusée par Google (' + r.status + ').<br><i>' + esc(r.reason) + '</i>', 'var(--bad)');
+    } else if (r.status === 404) {
+      showMsg('❌ Le modèle « ' + getModel() + ' » n\'est pas disponible pour ta clé.<br>Clique « Voir les modèles dispo » et choisis-en un dans la liste.', 'var(--bad)');
+    } else {
+      showMsg('❌ Test échoué (' + r.status + ').<br><i>' + esc(r.reason) + '</i>', 'var(--bad)');
+    }
   };
+
+  document.getElementById('key-diag').onclick = async () => {
+    const k = input.value.trim();
+    if (k.length < 10) { toast('Colle d\'abord ta clé.'); return; }
+    showMsg('Recherche des modèles…');
+    try {
+      const mods = await listerModeles(k);
+      if (!mods.length) { showMsg('Aucun modèle de génération disponible pour cette clé.', 'var(--bad)'); return; }
+      const dispo = mods.filter(m => /flash|pro/.test(m)).slice(0, 12);
+      showMsg('✅ Ta clé fonctionne. Modèles utilisables :<br>' + dispo.map(m => '• ' + esc(m)).join('<br>') + '<br><br>Choisis-en un dans le menu ci-dessus (Flash-Lite conseillé).', 'var(--ok)');
+    } catch (e) {
+      showMsg('❌ Impossible de lister les modèles.<br><i>' + esc(e.message) + '</i>', 'var(--bad)');
+    }
+  };
+
   const del = document.getElementById('key-del');
   if (del) del.onclick = () => { setKey(''); toast('Clé supprimée.'); render(); };
 }
