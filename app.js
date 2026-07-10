@@ -10,15 +10,16 @@
 /* -------------------------------------------------------------------------
    1. STOCKAGE LOCAL
    ------------------------------------------------------------------------- */
-const APP_VERSION = 'v2';
+const APP_VERSION = 'v3';
 const STORE_KEY = 'boussole.v1';
 const KEY_STORE = 'boussole.geminikey'; // clé API Gemini de l'utilisateur (sur son appareil)
 const MODEL_STORE = 'boussole.model';
-// Flash-Lite par défaut : quota gratuit bien plus généreux que 2.5-flash (qui sature vite).
-const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
+// gemini-2.5-flash par défaut : c'est le modèle gratuit le plus largement disponible.
+// (Flash-Lite et 2.0-flash ne sont pas activés sur toutes les clés.)
+const DEFAULT_MODEL = 'gemini-2.5-flash';
 const MODELES = [
-  { id: 'gemini-2.5-flash-lite', label: 'Flash-Lite — recommandé (quota gratuit élevé)' },
-  { id: 'gemini-2.5-flash', label: 'Flash — meilleure qualité (quota plus serré)' },
+  { id: 'gemini-2.5-flash', label: 'Flash — recommandé (le plus compatible)' },
+  { id: 'gemini-2.5-flash-lite', label: 'Flash-Lite — si dispo (quota élevé)' },
   { id: 'gemini-2.0-flash', label: '2.0 Flash — alternative' },
 ];
 function getModel() { try { return localStorage.getItem(MODEL_STORE) || DEFAULT_MODEL; } catch (e) { return DEFAULT_MODEL; } }
@@ -164,26 +165,44 @@ async function verifyLieu(nom, villeCtx) {
 /* -------------------------------------------------------------------------
    4. IA — Gemini avec la clé de l'utilisateur (BYOK)
    ------------------------------------------------------------------------- */
-async function callGemini(prompt, { json = false } = {}) {
+async function callGemini(prompt, { json = false, onStatus = null } = {}) {
   const key = getKey().trim();
   if (!key) throw new Error('Aucune clé Gemini enregistrée.');
-  console.log('[Voyage] appel Gemini avec le modèle :', getModel());
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${getModel()}:generateContent?key=${encodeURIComponent(key)}`;
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.5 },
-  };
+  const model = getModel();
+  console.log('[Voyage] appel Gemini avec le modèle :', model);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+  const body = { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.5 } };
   if (json) body.generationConfig.responseMimeType = 'application/json';
-  let res;
-  try {
-    res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  } catch (e) { throw new Error('Réseau indisponible.'); }
+
+  const unAppel = async () => {
+    try {
+      return await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    } catch (e) { throw new Error('Réseau indisponible.'); }
+  };
+  const litDetail = async (res) => { try { const j = await res.json(); return (j && j.error && j.error.message) || ''; } catch (e) { return ''; } };
+
+  let res = await unAppel();
+
+  // Quota gratuit très serré : si Google indique un délai court, on patiente et on réessaie UNE fois.
+  if (res.status === 429) {
+    const detail = await litDetail(res);
+    const m = detail.match(/retry in ([\d.]+)s/i);
+    const attente = m ? parseFloat(m[1]) : 0;
+    if (attente > 0 && attente <= 65) {
+      onStatus && onStatus('Quota momentané atteint. Nouvelle tentative dans ' + Math.ceil(attente) + ' s… (patiente)');
+      await new Promise(r => setTimeout(r, (attente + 2) * 1000));
+      res = await unAppel();
+    } else {
+      // Délai trop long (ou quota journalier épuisé) : on remonte le vrai message.
+      throw new Error('Quota du modèle « ' + model + ' » épuisé. Attends, ou choisis un autre modèle (menu 🔑).' + (detail ? ' [' + detail + ']' : ''));
+    }
+  }
+
   if (!res.ok) {
-    // On remonte le VRAI message de Google (sans jamais afficher la clé).
-    let detail = '';
-    try { const j = await res.json(); detail = (j && j.error && j.error.message) || ''; } catch (e) {}
+    const detail = await litDetail(res);
     if (res.status === 400 || res.status === 403) throw new Error('Clé refusée ou API non activée.' + (detail ? ' [' + detail + ']' : ''));
-    if (res.status === 429) throw new Error('Limite atteinte sur le modèle « ' + getModel() + ' ». Essaie le modèle Flash-Lite (menu 🔑) ou attends 1 minute.' + (detail ? ' [' + detail + ']' : ''));
+    if (res.status === 404) throw new Error('Le modèle « ' + model + ' » n\'est pas disponible pour ta clé. Choisis-en un autre (menu 🔑).' + (detail ? ' [' + detail + ']' : ''));
+    if (res.status === 429) throw new Error('Quota du modèle « ' + model + ' » encore atteint après attente. Réessaie dans 1 min.' + (detail ? ' [' + detail + ']' : ''));
     throw new Error('Gemini a répondu ' + res.status + '.' + (detail ? ' [' + detail + ']' : ''));
   }
   const data = await res.json();
@@ -280,7 +299,7 @@ function parseItineraire(txt) {
    ------------------------------------------------------------------------- */
 async function genererVoyage(w, onStep) {
   onStep && onStep('Génération de l\'itinéraire par l\'IA…');
-  const txt = await callGemini(construirePrompt(w), { json: true });
+  const txt = await callGemini(construirePrompt(w), { json: true, onStatus: onStep });
   const it = parseItineraire(txt);
 
   // Météo par date
@@ -435,7 +454,7 @@ function renderKey() {
       <select id="model-sel">
         ${MODELES.map(m => `<option value="${m.id}" ${getModel() === m.id ? 'selected' : ''}>${m.label}</option>`).join('')}
       </select>
-      <p class="small muted mt">Si tu tombes sur « quota atteint », garde Flash-Lite : c'est le plus généreux en gratuit.</p>
+      <p class="small muted mt">En cas de « quota atteint », l'app patiente et réessaie automatiquement. Si un modèle est « non disponible », clique « Voir les modèles dispo ».</p>
       <button class="btn primary mt" id="key-save">Tester et enregistrer</button>
       <button class="btn ghost mt" id="key-diag">🔍 Voir les modèles dispo pour ma clé</button>
       ${hasKey() ? '<button class="btn danger ghost mt" id="key-del">Supprimer ma clé</button>' : ''}
