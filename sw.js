@@ -1,7 +1,7 @@
 /* Voyage — service worker : met la coquille de l'app en cache pour un fonctionnement hors-ligne.
    Les appels réseau (Gemini, Open-Meteo, OpenStreetMap) ne sont JAMAIS mis en cache :
    ce sont des données fraîches, elles partent toujours au réseau. */
-const CACHE = 'boussole-v5';
+const CACHE = 'boussole-v6';
 const ASSETS = [
   './',
   './index.html',
@@ -35,7 +35,7 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
 
   // Toutes les API externes partent au réseau, jamais de cache.
-  const externes = ['generativelanguage.googleapis.com', 'open-meteo.com', 'nominatim.openstreetmap.org'];
+  const externes = ['generativelanguage.googleapis.com', 'api.groq.com', 'open-meteo.com', 'nominatim.openstreetmap.org'];
   if (externes.some((h) => url.hostname.endsWith(h))) return;
 
   const isCore = e.request.mode === 'navigate'

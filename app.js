@@ -10,20 +10,48 @@
 /* -------------------------------------------------------------------------
    1. STOCKAGE LOCAL
    ------------------------------------------------------------------------- */
-const APP_VERSION = 'v3';
+const APP_VERSION = 'v4';
 const STORE_KEY = 'boussole.v1';
-const KEY_STORE = 'boussole.geminikey'; // clé API Gemini de l'utilisateur (sur son appareil)
-const MODEL_STORE = 'boussole.model';
-// gemini-2.5-flash par défaut : c'est le modèle gratuit le plus largement disponible.
-// (Flash-Lite et 2.0-flash ne sont pas activés sur toutes les clés.)
-const DEFAULT_MODEL = 'gemini-2.5-flash';
-const MODELES = [
-  { id: 'gemini-2.5-flash', label: 'Flash — recommandé (le plus compatible)' },
-  { id: 'gemini-2.5-flash-lite', label: 'Flash-Lite — si dispo (quota élevé)' },
-  { id: 'gemini-2.0-flash', label: '2.0 Flash — alternative' },
-];
-function getModel() { try { return localStorage.getItem(MODEL_STORE) || DEFAULT_MODEL; } catch (e) { return DEFAULT_MODEL; } }
-function setModel(m) { try { localStorage.setItem(MODEL_STORE, m || DEFAULT_MODEL); } catch (e) {} }
+/* Fournisseurs d'IA supportés (BYOK : la clé de l'utilisateur, appel direct depuis le navigateur).
+   Groq par défaut : free tier vraiment généreux (des milliers de requêtes/jour), rapide,
+   sans les blocages de quota rencontrés sur Gemini. Gemini reste dispo en option. */
+const PROVIDERS = {
+  groq: {
+    label: 'Groq — gratuit et généreux (recommandé)',
+    kind: 'openai',
+    endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+    modelsUrl: 'https://api.groq.com/openai/v1/models',
+    keyStore: 'boussole.key.groq',
+    keyPrefix: 'gsk_',
+    keyUrl: 'https://console.groq.com/keys',
+    models: [
+      { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B (qualité, recommandé)' },
+      { id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B (plus rapide)' },
+    ],
+    defaultModel: 'llama-3.3-70b-versatile',
+  },
+  gemini: {
+    label: 'Google Gemini',
+    kind: 'gemini',
+    endpoint: 'https://generativelanguage.googleapis.com/v1beta',
+    keyStore: 'boussole.geminikey',
+    keyPrefix: 'AIza',
+    keyUrl: 'https://aistudio.google.com/apikey',
+    models: [
+      { id: 'gemini-2.5-flash', label: 'Flash 2.5' },
+      { id: 'gemini-2.5-flash-lite', label: 'Flash-Lite 2.5' },
+      { id: 'gemini-2.0-flash', label: '2.0 Flash' },
+    ],
+    defaultModel: 'gemini-2.5-flash',
+  },
+};
+const PROVIDER_STORE = 'boussole.provider';
+const MODEL_STORE_PREFIX = 'boussole.model.'; // un modèle mémorisé par fournisseur
+function getProviderId() { try { return localStorage.getItem(PROVIDER_STORE) || 'groq'; } catch (e) { return 'groq'; } }
+function setProviderId(p) { try { localStorage.setItem(PROVIDER_STORE, PROVIDERS[p] ? p : 'groq'); } catch (e) {} }
+function provider() { return PROVIDERS[getProviderId()] || PROVIDERS.groq; }
+function getModel() { const p = provider(); try { return localStorage.getItem(MODEL_STORE_PREFIX + getProviderId()) || p.defaultModel; } catch (e) { return p.defaultModel; } }
+function setModel(m) { try { localStorage.setItem(MODEL_STORE_PREFIX + getProviderId(), m || provider().defaultModel); } catch (e) {} }
 
 let state = { trips: [] };
 let route = { name: 'home', tripId: null }; // home | key | wizard | trip
@@ -41,8 +69,8 @@ function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
   catch (e) { toast('Sauvegarde impossible (stockage plein ?)'); }
 }
-function getKey() { try { return localStorage.getItem(KEY_STORE) || ''; } catch (e) { return ''; } }
-function setKey(k) { try { localStorage.setItem(KEY_STORE, k || ''); } catch (e) {} }
+function getKey() { try { return localStorage.getItem(provider().keyStore) || ''; } catch (e) { return ''; } }
+function setKey(k) { try { localStorage.setItem(provider().keyStore, k || ''); } catch (e) {} }
 function hasKey() { return getKey().trim().length > 10; }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
@@ -163,83 +191,114 @@ async function verifyLieu(nom, villeCtx) {
 }
 
 /* -------------------------------------------------------------------------
-   4. IA — Gemini avec la clé de l'utilisateur (BYOK)
+   4. IA — multi-fournisseurs (BYOK), appel direct depuis le navigateur.
+   Groq (format OpenAI) ou Gemini. La clé de l'utilisateur n'est jamais envoyée
+   ailleurs qu'au fournisseur choisi.
    ------------------------------------------------------------------------- */
-async function callGemini(prompt, { json = false, onStatus = null } = {}) {
+
+// Lit un message d'erreur exploitable dans une réponse (formats Google et OpenAI/Groq).
+async function litDetailErreur(res) {
+  try {
+    const j = await res.json();
+    if (j && j.error) return (typeof j.error === 'string') ? j.error : (j.error.message || '');
+    return '';
+  } catch (e) { return ''; }
+}
+
+// Construit la requête selon le fournisseur.
+function prepareRequete(p, key, prompt, json) {
+  if (p.kind === 'gemini') {
+    const url = `${p.endpoint}/models/${getModel()}:generateContent?key=${encodeURIComponent(key)}`;
+    const body = { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.5 } };
+    if (json) body.generationConfig.responseMimeType = 'application/json';
+    return { url, headers: { 'Content-Type': 'application/json' }, body };
+  }
+  // OpenAI-compatible (Groq)
+  const body = {
+    model: getModel(),
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.5,
+  };
+  if (json) body.response_format = { type: 'json_object' };
+  return { url: p.endpoint, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, body };
+}
+
+// Extrait le texte de la réponse selon le fournisseur.
+function extraireTexte(p, data) {
+  if (p.kind === 'gemini') return data?.candidates?.[0]?.content?.parts?.map(x => x.text || '').join('') || '';
+  return data?.choices?.[0]?.message?.content || '';
+}
+
+async function callAI(prompt, { json = false, onStatus = null } = {}) {
+  const p = provider();
   const key = getKey().trim();
-  if (!key) throw new Error('Aucune clé Gemini enregistrée.');
-  const model = getModel();
-  console.log('[Voyage] appel Gemini avec le modèle :', model);
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
-  const body = { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.5 } };
-  if (json) body.generationConfig.responseMimeType = 'application/json';
+  if (!key) throw new Error('Aucune clé enregistrée.');
+  console.log('[Voyage] appel', getProviderId(), 'modèle', getModel());
+  const { url, headers, body } = prepareRequete(p, key, prompt, json);
 
   const unAppel = async () => {
-    try {
-      return await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    } catch (e) { throw new Error('Réseau indisponible.'); }
+    try { return await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) }); }
+    catch (e) { throw new Error('Réseau indisponible.'); }
   };
-  const litDetail = async (res) => { try { const j = await res.json(); return (j && j.error && j.error.message) || ''; } catch (e) { return ''; } };
 
   let res = await unAppel();
 
-  // Quota gratuit très serré : si Google indique un délai court, on patiente et on réessaie UNE fois.
+  // Réessai auto une fois si le fournisseur indique un court délai (429).
   if (res.status === 429) {
-    const detail = await litDetail(res);
-    const m = detail.match(/retry in ([\d.]+)s/i);
-    const attente = m ? parseFloat(m[1]) : 0;
+    const detail = await litDetailErreur(res);
+    const m = detail.match(/(?:retry in|try again in|after)\s*([\d.]+)\s*s/i);
+    const ra = parseFloat(res.headers.get('retry-after') || '');
+    const attente = m ? parseFloat(m[1]) : (isFinite(ra) ? ra : 0);
     if (attente > 0 && attente <= 65) {
-      onStatus && onStatus('Quota momentané atteint. Nouvelle tentative dans ' + Math.ceil(attente) + ' s… (patiente)');
+      onStatus && onStatus('Limite momentanée atteinte. Nouvelle tentative dans ' + Math.ceil(attente) + ' s… (patiente)');
       await new Promise(r => setTimeout(r, (attente + 2) * 1000));
       res = await unAppel();
     } else {
-      // Délai trop long (ou quota journalier épuisé) : on remonte le vrai message.
-      throw new Error('Quota du modèle « ' + model + ' » épuisé. Attends, ou choisis un autre modèle (menu 🔑).' + (detail ? ' [' + detail + ']' : ''));
+      throw new Error('Quota du modèle « ' + getModel() + ' » atteint. Attends un peu, ou change de modèle/fournisseur (menu 🔑).' + (detail ? ' [' + detail + ']' : ''));
     }
   }
 
   if (!res.ok) {
-    const detail = await litDetail(res);
-    if (res.status === 400 || res.status === 403) throw new Error('Clé refusée ou API non activée.' + (detail ? ' [' + detail + ']' : ''));
-    if (res.status === 404) throw new Error('Le modèle « ' + model + ' » n\'est pas disponible pour ta clé. Choisis-en un autre (menu 🔑).' + (detail ? ' [' + detail + ']' : ''));
-    if (res.status === 429) throw new Error('Quota du modèle « ' + model + ' » encore atteint après attente. Réessaie dans 1 min.' + (detail ? ' [' + detail + ']' : ''));
-    throw new Error('Gemini a répondu ' + res.status + '.' + (detail ? ' [' + detail + ']' : ''));
+    const detail = await litDetailErreur(res);
+    if (res.status === 400 || res.status === 401 || res.status === 403) throw new Error('Clé refusée ou invalide.' + (detail ? ' [' + detail + ']' : ''));
+    if (res.status === 404) throw new Error('Le modèle « ' + getModel() + ' » n\'est pas disponible pour ta clé. Choisis-en un autre (menu 🔑).' + (detail ? ' [' + detail + ']' : ''));
+    if (res.status === 429) throw new Error('Quota encore atteint après attente. Réessaie dans 1 min.' + (detail ? ' [' + detail + ']' : ''));
+    throw new Error('Le fournisseur a répondu ' + res.status + '.' + (detail ? ' [' + detail + ']' : ''));
   }
   const data = await res.json();
-  const txt = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-  if (!txt) throw new Error('Réponse vide de Gemini.');
+  const txt = extraireTexte(p, data);
+  if (!txt) throw new Error('Réponse vide du fournisseur.');
   return txt;
 }
 
-// Petit appel de validation de la clé (onboarding).
-// Renvoie { ok, status, reason }. On distingue clé invalide / quota / modèle indisponible.
+// Validation de clé (onboarding). Renvoie { ok, status, reason }.
 async function testerCle(key) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${getModel()}:generateContent?key=${encodeURIComponent(key)}`;
+  const p = provider();
+  const { url, headers, body } = prepareRequete(p, key.trim(), 'Réponds juste: ok', false);
   let res;
-  try {
-    res = await fetch(url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: 'Réponds juste: ok' }] }] }),
-    });
-  } catch (e) { return { ok: false, status: 0, reason: 'Réseau indisponible.' }; }
+  try { res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) }); }
+  catch (e) { return { ok: false, status: 0, reason: 'Réseau indisponible.' }; }
   if (res.ok) return { ok: true, status: 200 };
-  let detail = '';
-  try { const j = await res.json(); detail = (j && j.error && j.error.message) || ''; } catch (e) {}
+  const detail = await litDetailErreur(res);
   return { ok: false, status: res.status, reason: detail || ('HTTP ' + res.status) };
 }
 
-// Diagnostic : liste les modèles que la clé peut réellement utiliser (generateContent).
+// Diagnostic : liste les modèles utilisables par la clé.
 async function listerModeles(key) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    let detail = ''; try { const j = await res.json(); detail = (j && j.error && j.error.message) || ''; } catch (e) {}
-    throw new Error(detail || ('HTTP ' + res.status));
+  const p = provider();
+  if (p.kind === 'gemini') {
+    const res = await fetch(`${p.endpoint}/models?key=${encodeURIComponent(key.trim())}`);
+    if (!res.ok) throw new Error((await litDetailErreur(res)) || ('HTTP ' + res.status));
+    const data = await res.json();
+    return (data.models || [])
+      .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map(m => (m.name || '').replace('models/', ''));
   }
+  // OpenAI-compatible (Groq)
+  const res = await fetch(p.modelsUrl, { headers: { 'Authorization': 'Bearer ' + key.trim() } });
+  if (!res.ok) throw new Error((await litDetailErreur(res)) || ('HTTP ' + res.status));
   const data = await res.json();
-  return (data.models || [])
-    .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
-    .map(m => (m.name || '').replace('models/', ''));
+  return (data.data || []).map(m => m.id);
 }
 
 function construirePrompt(w) {
@@ -299,7 +358,7 @@ function parseItineraire(txt) {
    ------------------------------------------------------------------------- */
 async function genererVoyage(w, onStep) {
   onStep && onStep('Génération de l\'itinéraire par l\'IA…');
-  const txt = await callGemini(construirePrompt(w), { json: true, onStatus: onStep });
+  const txt = await callAI(construirePrompt(w), { json: true, onStatus: onStep });
   const it = parseItineraire(txt);
 
   // Météo par date
@@ -387,14 +446,14 @@ function renderHome() {
   topbar().innerHTML = `
     <div class="title">🧭 Voyage</div>
     <div class="spacer"></div>
-    <button class="iconbtn" id="btn-key" title="Ma clé Gemini">🔑</button>`;
+    <button class="iconbtn" id="btn-key" title="Ma clé IA">🔑</button>`;
   document.getElementById('btn-key').onclick = () => { route = { name: 'key', back: 'home' }; render(); };
 
   let html = '';
   if (!hasKey()) {
     html += `<div class="card">
       <b>Bienvenue !</b>
-      <p class="muted small mt">Voyage crée tes itinéraires avec ta propre clé Gemini gratuite. Ça reste sur ton téléphone, c'est gratuit et illimité côté appli.</p>
+      <p class="muted small mt">Voyage crée tes itinéraires avec ta propre clé d'IA gratuite (Groq conseillé). Ça reste sur ton téléphone, aucun serveur.</p>
       <button class="btn primary mt" id="btn-setup">Configurer ma clé (2 min)</button>
     </div>`;
   }
@@ -428,43 +487,53 @@ function scoreLabel(score) { if (score == null) return '—'; return score + '% 
 
 /* --- Écran clé (BYOK) --- */
 function renderKey() {
-  topbar().innerHTML = `<button class="iconbtn" id="back">←</button><div class="title" style="margin-left:8px">Ma clé Gemini</div>`;
+  topbar().innerHTML = `<button class="iconbtn" id="back">←</button><div class="title" style="margin-left:8px">Ma clé IA</div>`;
   document.getElementById('back').onclick = () => { route = { name: route.back || 'home' }; render(); };
+  const p = provider();
+  const tuto = getProviderId() === 'groq'
+    ? ['Va sur <a href="' + p.keyUrl + '" target="_blank" rel="noopener">console.groq.com/keys</a>',
+       'Crée un compte gratuit (email ou Google), sans carte bancaire',
+       'Clique « Create API Key »',
+       'Copie la clé (elle commence par « gsk_… »)',
+       'Colle-la ci-dessous']
+    : ['Va sur <a href="' + p.keyUrl + '" target="_blank" rel="noopener">aistudio.google.com/apikey</a>',
+       'Connecte-toi avec ton compte Google',
+       'Clique « Create API key »',
+       'Copie la clé (elle commence par « AIza… »)',
+       'Colle-la ci-dessous'];
 
   view().innerHTML = `
     <div class="card">
-      <b>Pourquoi une clé ?</b>
-      <p class="muted small mt">Voyage utilise l'IA Gemini de Google pour générer tes voyages. Tu utilises TA clé personnelle : c'est gratuit, sans carte bancaire, et tes recherches ne passent que par ton appareil et Google.</p>
+      <label class="field">Fournisseur d'IA</label>
+      <select id="prov-sel">
+        ${Object.keys(PROVIDERS).map(id => `<option value="${id}" ${getProviderId() === id ? 'selected' : ''}>${PROVIDERS[id].label}</option>`).join('')}
+      </select>
+      <p class="muted small mt">BYOK : tu utilises TA clé, gratuite. Tes recherches ne passent que par ton appareil et le fournisseur choisi. <b>Groq</b> est conseillé (free tier large, pas de blocage de quota).</p>
     </div>
     <div class="card">
       <b>Obtenir ta clé (gratuit)</b>
-      <ol class="tuto">
-        <li>Va sur <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a></li>
-        <li>Connecte-toi avec ton compte Google</li>
-        <li>Clique sur « Create API key » / « Créer une clé »</li>
-        <li>Copie la clé (elle commence par « AIza… »)</li>
-        <li>Colle-la ci-dessous</li>
-      </ol>
+      <ol class="tuto">${tuto.map(s => '<li>' + s + '</li>').join('')}</ol>
     </div>
     <div class="card">
-      <label class="field">Ta clé Gemini</label>
-      <input type="password" id="key-input" placeholder="AIza…" value="${esc(getKey())}" autocomplete="off" autocapitalize="off" spellcheck="false" />
+      <label class="field">Ta clé (${esc(getProviderId() === 'groq' ? 'Groq' : 'Gemini')})</label>
+      <input type="password" id="key-input" placeholder="${p.keyPrefix}…" value="${esc(getKey())}" autocomplete="off" autocapitalize="off" spellcheck="false" />
       <label class="small muted mt" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="key-show" style="width:auto"> Afficher</label>
-      <label class="field">Modèle Gemini</label>
+      <label class="field">Modèle</label>
       <select id="model-sel">
-        ${MODELES.map(m => `<option value="${m.id}" ${getModel() === m.id ? 'selected' : ''}>${m.label}</option>`).join('')}
+        ${p.models.map(m => `<option value="${m.id}" ${getModel() === m.id ? 'selected' : ''}>${m.label}</option>`).join('')}
       </select>
       <p class="small muted mt">En cas de « quota atteint », l'app patiente et réessaie automatiquement. Si un modèle est « non disponible », clique « Voir les modèles dispo ».</p>
       <button class="btn primary mt" id="key-save">Tester et enregistrer</button>
       <button class="btn ghost mt" id="key-diag">🔍 Voir les modèles dispo pour ma clé</button>
       ${hasKey() ? '<button class="btn danger ghost mt" id="key-del">Supprimer ma clé</button>' : ''}
       <div id="key-msg" class="small mt"></div>
-      <p class="small muted mt">🔒 Ta clé reste sur cet appareil (stockage local du navigateur). Elle n'est jamais envoyée ailleurs qu'à Google.</p>
+      <p class="small muted mt">🔒 Ta clé reste sur cet appareil (stockage local du navigateur). Elle n'est jamais envoyée ailleurs qu'au fournisseur choisi.</p>
     </div>`;
 
   const input = document.getElementById('key-input');
   const msg = document.getElementById('key-msg');
   const showMsg = (html, color) => { msg.style.color = color || 'var(--txt-dim)'; msg.innerHTML = html; };
+  document.getElementById('prov-sel').onchange = (e) => { setProviderId(e.target.value); render(); };
   document.getElementById('key-show').onchange = (e) => { input.type = e.target.checked ? 'text' : 'password'; };
   document.getElementById('model-sel').onchange = (e) => { setModel(e.target.value); };
 
@@ -480,9 +549,9 @@ function renderKey() {
     } else if (r.status === 429) {
       // Clé VALIDE mais limite/quota atteint : on autorise l'enregistrement.
       setKey(k);
-      showMsg('⚠️ Clé enregistrée, mais le quota du modèle « ' + getModel() + ' » est atteint maintenant.<br>Réponse de Google : <i>' + esc(r.reason) + '</i><br>Attends quelques minutes, ou utilise le diagnostic ci-dessous pour choisir un autre modèle.', 'var(--warn)');
-    } else if (r.status === 400 || r.status === 403) {
-      showMsg('❌ Clé refusée par Google (' + r.status + ').<br><i>' + esc(r.reason) + '</i>', 'var(--bad)');
+      showMsg('⚠️ Clé enregistrée, mais le quota du modèle « ' + getModel() + ' » est atteint maintenant.<br>Réponse du fournisseur : <i>' + esc(r.reason) + '</i><br>Attends quelques minutes, ou utilise le diagnostic ci-dessous pour choisir un autre modèle.', 'var(--warn)');
+    } else if (r.status === 400 || r.status === 401 || r.status === 403) {
+      showMsg('❌ Clé refusée (' + r.status + ').<br><i>' + esc(r.reason) + '</i>', 'var(--bad)');
     } else if (r.status === 404) {
       showMsg('❌ Le modèle « ' + getModel() + ' » n\'est pas disponible pour ta clé.<br>Clique « Voir les modèles dispo » et choisis-en un dans la liste.', 'var(--bad)');
     } else {
@@ -528,7 +597,7 @@ const RYTHMES = [
 ];
 
 function startWizard() {
-  if (!hasKey()) { toast('Configure d\'abord ta clé Gemini.'); route = { name: 'key', back: 'home' }; render(); return; }
+  if (!hasKey()) { toast('Configure d\'abord ta clé IA.'); route = { name: 'key', back: 'home' }; render(); return; }
   const start = todayISO();
   const end = fmtISO(addDays(parseISO(start), 3));
   wizard = { dest: null, query: '', startDate: start, endDate: end, voyageurs: 'couple', budget: '', interets: [], rythme: 'equilibre' };
