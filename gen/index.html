@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#05060e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Générateur" />
+  <title>Générateur Voyage</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/favicon-64.png" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="wrap">
+    <div class="logo"><img src="icons/icon-192.png" width="76" height="76" alt="" /></div>
+    <h1 class="title">Générateur de licences</h1>
+
+    <!-- ÉCRAN 1 : configuration initiale -->
+    <section id="setup" class="card hidden">
+      <p class="lead">Première utilisation. Colle ta clé secrète et choisis un mot de passe. La clé sera <b>chiffrée et gardée uniquement sur ce téléphone</b>.</p>
+      <label>Clé secrète (fournie par Claude)</label>
+      <textarea id="s-key" rows="4" placeholder='{"key_ops":["sign"],...}' autocomplete="off" spellcheck="false"></textarea>
+      <label>Mot de passe maître</label>
+      <input id="s-pw" type="password" placeholder="Choisis un mot de passe fort" autocomplete="new-password" />
+      <label>Confirme le mot de passe</label>
+      <input id="s-pw2" type="password" placeholder="Retape-le" autocomplete="new-password" />
+      <button id="s-go" class="btn">🔒 Chiffrer et enregistrer</button>
+      <p id="s-err" class="err"></p>
+    </section>
+
+    <!-- ÉCRAN 2 : déverrouillage -->
+    <section id="unlock" class="card hidden">
+      <label>Mot de passe maître</label>
+      <input id="u-pw" type="password" placeholder="Ton mot de passe" autocomplete="current-password" />
+      <button id="u-go" class="btn">Déverrouiller</button>
+      <p id="u-err" class="err"></p>
+      <button id="u-reset" class="linkbtn">Réinitialiser (effacer la clé de ce tél)</button>
+    </section>
+
+    <!-- ÉCRAN 3 : génération -->
+    <section id="gen" class="card hidden">
+      <label>Identifiant d'appareil du client</label>
+      <input id="g-id" type="text" placeholder="XXXX-XXXX" autocomplete="off" maxlength="9" />
+      <button id="g-go" class="btn">Générer la clé de licence</button>
+      <div id="g-out" class="out hidden">
+        <label>Clé à donner au client</label>
+        <div id="g-key" class="key"></div>
+        <button id="g-copy" class="btn btn-2">📋 Copier la clé</button>
+        <p id="g-ok" class="ok"></p>
+      </div>
+      <p id="g-err" class="err"></p>
+      <button id="g-lock" class="linkbtn">🔒 Verrouiller</button>
+    </section>
+  </main>
+  <script src="gen.js"></script>
+</body>
+</html>

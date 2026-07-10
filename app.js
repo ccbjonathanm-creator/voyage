@@ -10,7 +10,7 @@
 /* -------------------------------------------------------------------------
    1. STOCKAGE LOCAL
    ------------------------------------------------------------------------- */
-const APP_VERSION = 'v6';
+const APP_VERSION = 'v7';
 const STORE_KEY = 'boussole.v1';
 /* Fournisseurs d'IA supportés (BYOK : la clé de l'utilisateur, appel direct depuis le navigateur).
    Groq par défaut : free tier vraiment généreux (des milliers de requêtes/jour), rapide,
@@ -73,6 +73,78 @@ function getKey() { try { return localStorage.getItem(provider().keyStore) || ''
 function setKey(k) { try { localStorage.setItem(provider().keyStore, k || ''); } catch (e) {} }
 function hasKey() { return getKey().trim().length > 10; }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+/* -------------------------------------------------------------------------
+   1bis. LICENCE — essai de 2 générations gratuites, puis déblocage à vie.
+   100% hors-ligne : licence signée (ECDSA P-256) et liée à l'appareil.
+   La clé publique est ci-dessous ; la clé privée reste dans le générateur du vendeur.
+   Note assumée : l'essai local se remet à zéro si on réinstalle (limite de tout
+   système sans serveur). Le déblocage payant, lui, est solide et permanent.
+   ------------------------------------------------------------------------- */
+const LIC = { device: 'voyage.device', licence: 'voyage.licence', gencount: 'voyage.gencount' };
+const TRIAL_GENERATIONS = 2;
+const PRICE = '5 €';
+const PAY_URL = ''; // lien de paiement (PayPal.me / Lydia) — à renseigner par le vendeur
+const LICENCE_PUBKEY = { kty: 'EC', crv: 'P-256', x: 'YbDelKNMSemSopaa1U9TrTA5L4XpkkJ1BHoxOp2lzKo', y: '4INPqTfFNgy7wPwqS3_hy9z7kH5vGEFgcGp3pYSDWUE' };
+let licensed = false;
+const _enc = new TextEncoder();
+function _fromB64(s) { const b = atob((s || '').replace(/\s+/g, '')); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+
+// Identifiant d'appareil : aléatoire, stable, non secret. C'est lui qui est signé.
+function genDeviceId() {
+  const a = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // sans I,O,0,1,L
+  const r = crypto.getRandomValues(new Uint8Array(8));
+  let s = ''; for (const b of r) s += a[b % a.length];
+  return s.slice(0, 4) + '-' + s.slice(4);
+}
+function getDeviceId() { let id = localStorage.getItem(LIC.device); if (!id) { id = genDeviceId(); localStorage.setItem(LIC.device, id); } return id; }
+function getGenCount() { return parseInt(localStorage.getItem(LIC.gencount) || '0', 10) || 0; }
+function incGenCount() { localStorage.setItem(LIC.gencount, String(getGenCount() + 1)); }
+function trialLeft() { return Math.max(0, TRIAL_GENERATIONS - getGenCount()); }
+function canGenerate() { return licensed || trialLeft() > 0; }
+async function verifyLicence(key, deviceId) {
+  if (!key) return false;
+  try {
+    const pub = await crypto.subtle.importKey('jwk', LICENCE_PUBKEY, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, _fromB64(key), _enc.encode('voyage-licence:' + deviceId));
+  } catch (e) { return false; }
+}
+async function refreshLicence() { licensed = await verifyLicence(localStorage.getItem(LIC.licence), getDeviceId()); return licensed; }
+async function submitLicence(raw) {
+  const clean = (raw || '').trim().replace(/\s+/g, '');
+  const ok = await verifyLicence(clean, getDeviceId());
+  if (ok) { localStorage.setItem(LIC.licence, clean); licensed = true; }
+  return ok;
+}
+function openLicenceSheet(essaiTermine) {
+  const statut = licensed
+    ? '✓ Version à vie active sur cet appareil. Merci !'
+    : (essaiTermine ? 'Ton essai gratuit est terminé.' : 'Essai : ' + trialLeft() + ' génération(s) gratuite(s) restante(s).');
+  openSheet(`
+    <h2>Débloquer Voyage (${PRICE})</h2>
+    <p class="small ${licensed ? 'muted' : ''}" ${licensed ? '' : 'style="color:var(--warn)"'}>${statut}</p>
+    ${licensed ? '' : `
+    <p class="small muted mt">Déblocage à vie sur cet appareil, un seul paiement. ${PAY_URL ? 'Paie ici : <a href="' + PAY_URL + '" target="_blank" rel="noopener">payer ' + PRICE + '</a>, puis' : 'Pour payer,'} envoie ton identifiant au vendeur et colle la clé reçue.</p>
+    <label class="field">Ton identifiant d'appareil (à communiquer)</label>
+    <input type="text" id="lic-device" readonly value="${getDeviceId()}" style="font-weight:700;letter-spacing:2px;text-align:center">
+    <button class="btn ghost mt" id="lic-copy">Copier mon identifiant</button>
+    <label class="field">Clé de licence reçue</label>
+    <input type="text" id="lic-key" placeholder="Colle ta clé ici" autocomplete="off" spellcheck="false">
+    <button class="btn primary mt" id="lic-go">Activer</button>
+    <div id="lic-err" class="small mt" style="color:var(--bad)"></div>`}
+    <button class="btn ghost mt" id="lic-close">Fermer</button>`);
+  document.getElementById('lic-close').onclick = closeSheet;
+  if (!licensed) {
+    document.getElementById('lic-copy').onclick = () => {
+      navigator.clipboard.writeText(getDeviceId()).then(() => toast('Identifiant copié ✓')).catch(() => toast('Copie impossible.'));
+    };
+    document.getElementById('lic-go').onclick = async () => {
+      const ok = await submitLicence(document.getElementById('lic-key').value);
+      if (ok) { closeSheet(); toast('Version à vie activée ✓ Merci !'); render(); }
+      else document.getElementById('lic-err').textContent = 'Clé invalide pour cet appareil.';
+    };
+  }
+}
 
 /* -------------------------------------------------------------------------
    2. OUTILS DATES
@@ -483,11 +555,26 @@ function renderHome() {
     html += '</div>';
   }
   html += `<button class="btn primary mt2" id="btn-new">＋ Nouvel itinéraire</button>`;
+
+  // Bandeau licence / essai
+  if (licensed) {
+    html += `<p class="small muted center mt2">✓ Version à vie active. Merci !</p>`;
+  } else {
+    const left = trialLeft();
+    html += `<div class="card mt2" id="lic-banner" style="cursor:pointer">
+      <b>${left > 0 ? '🎁 Essai gratuit' : '🔒 Essai terminé'}</b>
+      <p class="small muted mt">${left > 0
+        ? left + ' itinéraire(s) gratuit(s) restant(s). Débloque la version à vie (' + PRICE + ') quand tu veux.'
+        : 'Débloque la version à vie (' + PRICE + ', un seul paiement) pour continuer à générer.'}</p>
+    </div>`;
+  }
   view().innerHTML = html;
 
   const setup = document.getElementById('btn-setup');
   if (setup) setup.onclick = () => { route = { name: 'key', back: 'home' }; render(); };
   document.getElementById('btn-new').onclick = startWizard;
+  const banner = document.getElementById('lic-banner');
+  if (banner) banner.onclick = () => openLicenceSheet(trialLeft() === 0);
   view().querySelectorAll('.trip-card').forEach(c => c.onclick = () => { route = { name: 'trip', tripId: c.dataset.id }; render(); });
 }
 function badgeClass(score) { if (score == null) return 'pending'; if (score >= 70) return 'ok'; if (score >= 40) return 'warn'; return 'pending'; }
@@ -715,6 +802,10 @@ async function lancerGeneration() {
   if (!w.dest) { toast('Choisis une destination dans la liste.'); return; }
   if (nbDaysInclusive(w.startDate, w.endDate) > 14) { toast('Limite-toi à 14 jours pour de bons résultats.'); return; }
 
+  // Verrou essai/licence : essai gratuit épuisé et pas de licence -> écran de déblocage.
+  await refreshLicence();
+  if (!canGenerate()) { openLicenceSheet(true); return; }
+
   topbar().innerHTML = `<div class="title">✨ Création…</div>`;
   view().innerHTML = `<div class="loader"><div class="spinner"></div><div class="steps" id="steps">Préparation…</div><p class="small muted">Ça prend 20 à 60 secondes.</p><p class="small muted">Modèle utilisé : <b>${esc(getModel())}</b> · app ${APP_VERSION}</p></div>`;
   const step = (m) => { const el = document.getElementById('steps'); if (el) el.textContent = m; };
@@ -722,6 +813,7 @@ async function lancerGeneration() {
   try {
     const trip = await genererVoyage(w, step);
     state.trips.push(trip); save();
+    if (!licensed) incGenCount(); // l'essai ne décompte que sur une génération réussie
     route = { name: 'trip', tripId: trip.id }; render();
     toast('Itinéraire prêt ✅');
   } catch (e) {
@@ -901,3 +993,5 @@ document.getElementById('sheet-backdrop').addEventListener('click', closeSheet);
 
 load();
 render();
+// Vérifie la licence au démarrage (async), puis rafraîchit l'accueil si l'état change.
+refreshLicence().then((ok) => { if (ok && route.name === 'home') render(); });
