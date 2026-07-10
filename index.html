@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#6366f1" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Voyage" />
+  <title>Voyage — Itinéraires de voyage IA</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/favicon-64.png" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <div id="app" class="app">
+    <header class="topbar" id="topbar"><!-- rendu par JS --></header>
+    <main id="view" class="view"><!-- rendu par JS --></main>
+  </div>
+
+  <!-- FEUILLE MODALE -->
+  <div id="sheet-backdrop" class="sheet-backdrop hidden"></div>
+  <div id="sheet" class="sheet hidden" role="dialog" aria-modal="true"></div>
+
+  <!-- TOAST -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
