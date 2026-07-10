@@ -10,7 +10,7 @@
 /* -------------------------------------------------------------------------
    1. STOCKAGE LOCAL
    ------------------------------------------------------------------------- */
-const APP_VERSION = 'v1';
+const APP_VERSION = 'v2';
 const STORE_KEY = 'boussole.v1';
 const KEY_STORE = 'boussole.geminikey'; // clé API Gemini de l'utilisateur (sur son appareil)
 const MODEL_STORE = 'boussole.model';
@@ -167,6 +167,7 @@ async function verifyLieu(nom, villeCtx) {
 async function callGemini(prompt, { json = false } = {}) {
   const key = getKey().trim();
   if (!key) throw new Error('Aucune clé Gemini enregistrée.');
+  console.log('[Voyage] appel Gemini avec le modèle :', getModel());
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${getModel()}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -616,7 +617,7 @@ async function lancerGeneration() {
   if (nbDaysInclusive(w.startDate, w.endDate) > 14) { toast('Limite-toi à 14 jours pour de bons résultats.'); return; }
 
   topbar().innerHTML = `<div class="title">✨ Création…</div>`;
-  view().innerHTML = `<div class="loader"><div class="spinner"></div><div class="steps" id="steps">Préparation…</div><p class="small muted">Ça prend 20 à 60 secondes.</p></div>`;
+  view().innerHTML = `<div class="loader"><div class="spinner"></div><div class="steps" id="steps">Préparation…</div><p class="small muted">Ça prend 20 à 60 secondes.</p><p class="small muted">Modèle utilisé : <b>${esc(getModel())}</b> · app ${APP_VERSION}</p></div>`;
   const step = (m) => { const el = document.getElementById('steps'); if (el) el.textContent = m; };
 
   try {
