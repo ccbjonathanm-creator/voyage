@@ -81,7 +81,7 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
    Note assumée : l'essai local se remet à zéro si on réinstalle (limite de tout
    système sans serveur). Le déblocage payant, lui, est solide et permanent.
    ------------------------------------------------------------------------- */
-const LIC = { device: 'voyage.device', licence: 'voyage.licence', gencount: 'voyage.gencount' };
+const LIC = { device: 'voyage.device', licence: 'voyage.licence', licemail: 'voyage.licemail', gencount: 'voyage.gencount' };
 const TRIAL_GENERATIONS = 2;
 const PRICE = '5 €';
 const PAY_URL = ''; // lien de paiement (PayPal.me / Lydia) — à renseigner par le vendeur
@@ -108,32 +108,33 @@ function getGenCount() { return parseInt(localStorage.getItem(LIC.gencount) || '
 function incGenCount() { localStorage.setItem(LIC.gencount, String(getGenCount() + 1)); }
 function trialLeft() { return Math.max(0, TRIAL_GENERATIONS - getGenCount()); }
 function canGenerate() { return licensed || trialLeft() > 0; }
-async function verifyLicence(key, deviceId) {
+// normalisation IDENTIQUE côté vérif et côté générateur
+const normEmail = (e) => (e || '').trim().toLowerCase();
+async function verifyLicence(key, email) {
   if (!key) return false;
   try {
     const pub = await crypto.subtle.importKey('jwk', LICENCE_PUBKEY, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
-    return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, _fromB64(key), _enc.encode('voyage-licence:' + deviceId));
+    return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, _fromB64(key), _enc.encode('voyage-licence:' + normEmail(email)));
   } catch (e) { return false; }
 }
-async function refreshLicence() { licensed = await verifyLicence(localStorage.getItem(LIC.licence), getDeviceId()); return licensed; }
-async function submitLicence(raw) {
+async function refreshLicence() { licensed = await verifyLicence(localStorage.getItem(LIC.licence), localStorage.getItem(LIC.licemail)); return licensed; }
+async function submitLicence(email, raw) {
   const clean = (raw || '').trim().replace(/\s+/g, '');
-  const ok = await verifyLicence(clean, getDeviceId());
-  if (ok) { localStorage.setItem(LIC.licence, clean); licensed = true; }
+  const ok = await verifyLicence(clean, email);
+  if (ok) { localStorage.setItem(LIC.licence, clean); localStorage.setItem(LIC.licemail, normEmail(email)); licensed = true; }
   return ok;
 }
 function openLicenceSheet(essaiTermine) {
   const statut = licensed
-    ? '✓ Version à vie active sur cet appareil. Merci !'
+    ? '✓ Version à vie active. Merci !'
     : (essaiTermine ? 'Ton essai gratuit est terminé.' : 'Essai : ' + trialLeft() + ' génération(s) gratuite(s) restante(s).');
   openSheet(`
     <h2>Débloquer Voyage (${PRICE})</h2>
     <p class="small ${licensed ? 'muted' : ''}" ${licensed ? '' : 'style="color:var(--warn)"'}>${statut}</p>
     ${licensed ? '' : `
-    <p class="small muted mt">Déblocage à vie sur cet appareil, un seul paiement. ${PAY_URL ? 'Paie ici : <a href="' + PAY_URL + '" target="_blank" rel="noopener">payer ' + PRICE + '</a>, puis' : 'Pour payer,'} envoie ton identifiant au vendeur et colle la clé reçue.</p>
-    <label class="field">Ton identifiant d'appareil (à communiquer)</label>
-    <input type="text" id="lic-device" readonly value="${getDeviceId()}" style="font-weight:700;letter-spacing:2px;text-align:center">
-    <button class="btn ghost mt" id="lic-copy">Copier mon identifiant</button>
+    <p class="small muted mt">Déblocage à vie, un seul paiement, valable sur tous tes appareils (même après réinstallation). ${PAY_URL ? 'Paie ici : <a href="' + PAY_URL + '" target="_blank" rel="noopener">payer ' + PRICE + '</a>, puis' : 'Pour payer,'} envoie ton e-mail au vendeur et colle la clé reçue.</p>
+    <label class="field">Ton e-mail d'achat</label>
+    <input type="email" id="lic-email" placeholder="Ton e-mail d'achat" autocomplete="email" autocapitalize="off" spellcheck="false">
     <label class="field">Clé de licence reçue</label>
     <input type="text" id="lic-key" placeholder="Colle ta clé ici" autocomplete="off" spellcheck="false">
     <button class="btn primary mt" id="lic-go">Activer</button>
@@ -141,13 +142,13 @@ function openLicenceSheet(essaiTermine) {
     <button class="btn ghost mt" id="lic-close">Fermer</button>`);
   document.getElementById('lic-close').onclick = closeSheet;
   if (!licensed) {
-    document.getElementById('lic-copy').onclick = () => {
-      navigator.clipboard.writeText(getDeviceId()).then(() => toast('Identifiant copié ✓')).catch(() => toast('Copie impossible.'));
-    };
     document.getElementById('lic-go').onclick = async () => {
-      const ok = await submitLicence(document.getElementById('lic-key').value);
+      const email = document.getElementById('lic-email').value.trim();
+      const key = document.getElementById('lic-key').value;
+      if (!email) { document.getElementById('lic-err').textContent = 'Saisis ton e-mail d\'achat.'; return; }
+      const ok = await submitLicence(email, key);
       if (ok) { closeSheet(); toast('Version à vie activée ✓ Merci !'); render(); }
-      else document.getElementById('lic-err').textContent = 'Clé invalide pour cet appareil.';
+      else document.getElementById('lic-err').textContent = 'E-mail ou clé incorrects.';
     };
   }
 }
@@ -171,8 +172,8 @@ async function genDecrypt(vault, pw) {
   return _dec.decode(pt);
 }
 function genImportSign(privStr) { return crypto.subtle.importKey('jwk', JSON.parse(privStr), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']); }
-async function genMakeLicence(deviceId) {
-  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, genSignKey, _enc.encode('voyage-licence:' + deviceId));
+async function genMakeLicence(email) {
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, genSignKey, _enc.encode('voyage-licence:' + normEmail(email)));
   return _b64(sig);
 }
 function openGeneratorSheet() { genSignKey = null; genRender(genVault() ? 'unlock' : 'setup'); }
@@ -209,8 +210,8 @@ function genRender(screen) {
   } else {
     openSheet(`
       <h2>🔑 Générer une licence</h2>
-      <label class="field">Identifiant d'appareil du client</label>
-      <input id="gg-id" type="text" placeholder="XXXX-XXXX" maxlength="9" style="text-align:center;font-weight:800;letter-spacing:2px">
+      <label class="field">E-mail du client</label>
+      <input id="gg-id" type="email" placeholder="client@mail.com" autocapitalize="off" spellcheck="false" style="text-align:center;font-weight:700">
       <button class="btn primary mt" id="gg-go">Générer la clé</button>
       <div id="gg-out" class="hidden mt">
         <label class="field">Clé à donner au client</label>
@@ -220,8 +221,6 @@ function genRender(screen) {
       </div>
       <div id="gg-err" class="small mt" style="color:var(--bad)"></div>
       <button class="btn ghost mt" id="gg-lock">🔒 Verrouiller</button>`);
-    const idIn = document.getElementById('gg-id');
-    idIn.oninput = (e) => { e.target.value = e.target.value.toUpperCase(); };
     document.getElementById('gg-go').onclick = genDoGenerate;
     document.getElementById('gg-lock').onclick = () => { genSignKey = null; genRender('unlock'); };
   }
@@ -251,8 +250,8 @@ async function genDoUnlock() {
 }
 async function genDoGenerate() {
   const err = document.getElementById('gg-err'); err.textContent = ''; document.getElementById('gg-out').classList.add('hidden');
-  const id = document.getElementById('gg-id').value.trim().toUpperCase();
-  if (!/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(id)) { err.textContent = 'Identifiant invalide. Format : XXXX-XXXX.'; return; }
+  const id = document.getElementById('gg-id').value.trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) { err.textContent = 'Entre un e-mail valide.'; return; }
   if (!genSignKey) { genRender('unlock'); return; }
   try {
     document.getElementById('gg-key').textContent = await genMakeLicence(id);

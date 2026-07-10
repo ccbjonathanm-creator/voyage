@@ -36,8 +36,10 @@ async function importSign(privStr) {
   const jwk = JSON.parse(privStr);
   return crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
 }
-async function makeLicence(deviceId) {
-  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, signKey, enc.encode('voyage-licence:' + deviceId));
+// normalisation IDENTIQUE à app.js (trim + minuscules)
+const normEmail = (e) => (e || '').trim().toLowerCase();
+async function makeLicence(email) {
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, signKey, enc.encode('voyage-licence:' + normEmail(email)));
   return b64e(sig);
 }
 
@@ -84,11 +86,10 @@ el('u-reset').addEventListener('click', () => {
 });
 
 // --- Écran 3 : génération ---
-el('g-id').addEventListener('input', (e) => { e.target.value = e.target.value.toUpperCase(); });
 el('g-go').addEventListener('click', async () => {
   const err = el('g-err'); err.textContent = ''; el('g-out').classList.add('hidden');
-  const id = el('g-id').value.trim().toUpperCase();
-  if (!/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(id)) { err.textContent = 'Identifiant invalide. Format attendu : XXXX-XXXX.'; return; }
+  const id = el('g-id').value.trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) { err.textContent = 'Entre un e-mail valide.'; return; }
   if (!signKey) { show('unlock'); return; }
   try {
     el('g-key').textContent = await makeLicence(id);
