@@ -10,7 +10,7 @@
 /* -------------------------------------------------------------------------
    1. STOCKAGE LOCAL
    ------------------------------------------------------------------------- */
-const APP_VERSION = 'v5';
+const APP_VERSION = 'v6';
 const STORE_KEY = 'boussole.v1';
 /* Fournisseurs d'IA supportés (BYOK : la clé de l'utilisateur, appel direct depuis le navigateur).
    Groq par défaut : free tier vraiment généreux (des milliers de requêtes/jour), rapide,
@@ -310,6 +310,7 @@ function construirePrompt(w) {
 CONTEXTE VOYAGEUR :
 - Dates : du ${humanDate(w.startDate)} au ${humanDate(w.endDate)}
 - Voyageurs : ${w.voyageurs}
+- Ville de départ : ${w.depart || 'non précisée'}
 - Budget indicatif : ${w.budget || 'non précisé'}
 - Centres d'intérêt : ${interets}
 - Rythme souhaité : ${w.rythme}
@@ -325,6 +326,8 @@ Réponds UNIQUEMENT en JSON valide, sans texte autour, avec EXACTEMENT cette str
 {
   "resume": "2 phrases qui résument l'esprit du séjour",
   "budget_estime": "estimation prudente du budget sur place par personne, HORS vol et hôtel (ex: 'environ 250-350 € / personne pour ${n} jours : repas, visites, transports locaux')",
+  "iata_depart": "code IATA (3 lettres majuscules) de l'aéroport principal le plus proche de la ville de départ, ou '' si inconnu",
+  "iata_arrivee": "code IATA (3 lettres majuscules) de l'aéroport principal desservant ${dest.name}, ou '' si inconnu",
   "jours": [
     {
       "titre": "titre court de la journée",
@@ -394,6 +397,8 @@ async function genererVoyage(w, onStep) {
     rythme: w.rythme,
     resume: it.resume || '',
     budget_estime: it.budget_estime || '',
+    iata_depart: (it.iata_depart || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3),
+    iata_arrivee: (it.iata_arrivee || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3),
     jours: it.jours,
     weather,
     createdAt: Date.now(),
@@ -746,22 +751,35 @@ function carteReservation(t) {
   const adultes = nbAdultes(t.voyageurs);
   const depart = (t.depart || '').trim();
 
-  const gflights = 'https://www.google.com/travel/flights?q=' +
-    encodeURIComponent('vols ' + (depart ? depart + ' ' : '') + dest + ' ' + t.startDate + ' au ' + t.endDate);
-  const skyscanner = 'https://www.skyscanner.fr/transport/vols/?adults=' + adultes +
-    '&destination=' + encodeURIComponent(dest);
   const booking = 'https://www.booking.com/searchresults.html?ss=' + encodeURIComponent(dest) +
     '&checkin=' + t.startDate + '&checkout=' + t.endDate + '&group_adults=' + adultes;
   const airbnb = 'https://www.airbnb.fr/s/' + encodeURIComponent(dest) + '/homes?checkin=' +
     t.startDate + '&checkout=' + t.endDate + '&adults=' + adultes;
 
+  // Vols : Kayak se pré-remplit vraiment, mais il faut les codes aéroport (IATA).
+  const oa = t.iata_depart, da = t.iata_arrivee;
+  let volsHtml;
+  if (oa && da) {
+    const kayak = 'https://www.kayak.fr/flights/' + oa + '-' + da + '/' + t.startDate + '/' + t.endDate + '?sort=bestflight_a';
+    const gflights = 'https://www.google.com/travel/flights?q=' +
+      encodeURIComponent('vols ' + oa + ' ' + da + ' ' + t.startDate + ' retour ' + t.endDate);
+    volsHtml = `<div class="small muted mt">✈️ Vols ${esc(oa)} → ${esc(da)}${depart ? ' (depuis ' + esc(depart) + ')' : ''}</div>
+      <a class="btn mt" href="${kayak}" target="_blank" rel="noopener">Kayak (pré-rempli)</a>
+      <a class="btn ghost mt" href="${gflights}" target="_blank" rel="noopener">Google Flights</a>`;
+  } else {
+    // Pas de code aéroport (ancien voyage ou ville non reconnue) : recherche simple.
+    const gflights = 'https://www.google.com/travel/flights?q=' +
+      encodeURIComponent('vols ' + (depart ? depart + ' ' : '') + dest);
+    volsHtml = `<div class="small muted mt">✈️ Vols</div>
+      <a class="btn mt" href="${gflights}" target="_blank" rel="noopener">Chercher un vol (Google Flights)</a>
+      <p class="small muted mt">Codes aéroport indisponibles : régénère l'itinéraire avec une ville de départ pour un lien Kayak pré-rempli.</p>`;
+  }
+
   return `<div class="card">
     <b>🧳 Vols & hébergement</b>
     ${t.budget_estime ? `<p class="small mt" style="color:var(--accent2)">💶 ${esc(t.budget_estime)}</p>` : ''}
     <p class="small muted mt">Boussole ne réserve pas à ta place : ces liens ouvrent les vrais sites avec tes dates déjà remplies. Prix réels, tu réserves toi-même.</p>
-    <div class="small muted mt">✈️ Vols${depart ? ' (depuis ' + esc(depart) + ')' : ''}</div>
-    <a class="btn mt" href="${gflights}" target="_blank" rel="noopener">Google Flights</a>
-    <a class="btn ghost mt" href="${skyscanner}" target="_blank" rel="noopener">Skyscanner</a>
+    ${volsHtml}
     <div class="small muted mt2">🏨 Hébergement (${adultes} voyageur(s))</div>
     <a class="btn mt" href="${booking}" target="_blank" rel="noopener">Booking.com</a>
     <a class="btn ghost mt" href="${airbnb}" target="_blank" rel="noopener">Airbnb</a>
