@@ -10,7 +10,7 @@
 /* -------------------------------------------------------------------------
    1. STOCKAGE LOCAL
    ------------------------------------------------------------------------- */
-const APP_VERSION = 'v7';
+const APP_VERSION = 'v8';
 const STORE_KEY = 'boussole.v1';
 /* Fournisseurs d'IA supportés (BYOK : la clé de l'utilisateur, appel direct depuis le navigateur).
    Groq par défaut : free tier vraiment généreux (des milliers de requêtes/jour), rapide,
@@ -88,7 +88,13 @@ const PAY_URL = ''; // lien de paiement (PayPal.me / Lydia) — à renseigner pa
 const LICENCE_PUBKEY = { kty: 'EC', crv: 'P-256', x: 'YbDelKNMSemSopaa1U9TrTA5L4XpkkJ1BHoxOp2lzKo', y: '4INPqTfFNgy7wPwqS3_hy9z7kH5vGEFgcGp3pYSDWUE' };
 let licensed = false;
 const _enc = new TextEncoder();
+const _dec = new TextDecoder();
 function _fromB64(s) { const b = atob((s || '').replace(/\s+/g, '')); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+function _b64(buf) { let s = ''; for (const x of new Uint8Array(buf)) s += String.fromCharCode(x); return btoa(s); }
+async function _deriveAes(pw, salt) {
+  const base = await crypto.subtle.importKey('raw', _enc.encode(pw), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 310000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
 
 // Identifiant d'appareil : aléatoire, stable, non secret. C'est lui qui est signé.
 function genDeviceId() {
@@ -144,6 +150,132 @@ function openLicenceSheet(essaiTermine) {
       else document.getElementById('lic-err').textContent = 'Clé invalide pour cet appareil.';
     };
   }
+}
+
+/* ---- Générateur de licences intégré (accès caché : appui long sur la version) ----
+   Réservé au vendeur (Jonathan). La clé privée n'est PAS dans le code : il la colle
+   une fois, elle est chiffrée (AES-GCM + mot de passe) et gardée sur ce seul appareil. */
+const GEN_LS = 'voyage.genvault';
+let genSignKey = null;
+function genVault() { try { return JSON.parse(localStorage.getItem(GEN_LS)); } catch (e) { return null; } }
+async function genEncrypt(privStr, pw) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await _deriveAes(pw, salt);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, _enc.encode(privStr));
+  return { v: 1, salt: _b64(salt), iv: _b64(iv), ct: _b64(ct) };
+}
+async function genDecrypt(vault, pw) {
+  const key = await _deriveAes(pw, _fromB64(vault.salt));
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: _fromB64(vault.iv) }, key, _fromB64(vault.ct));
+  return _dec.decode(pt);
+}
+function genImportSign(privStr) { return crypto.subtle.importKey('jwk', JSON.parse(privStr), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']); }
+async function genMakeLicence(deviceId) {
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, genSignKey, _enc.encode('voyage-licence:' + deviceId));
+  return _b64(sig);
+}
+function openGeneratorSheet() { genSignKey = null; genRender(genVault() ? 'unlock' : 'setup'); }
+function genRender(screen) {
+  if (screen === 'setup') {
+    openSheet(`
+      <h2>🔑 Générateur — configuration</h2>
+      <p class="small muted">Réservé au vendeur. Colle ta clé secrète et choisis un mot de passe maître. La clé sera chiffrée et gardée uniquement sur cet appareil.</p>
+      <label class="field">Clé secrète (fournie par Claude)</label>
+      <textarea id="gs-key" rows="4" placeholder='{"key_ops":["sign"],...}' style="width:100%" spellcheck="false"></textarea>
+      <label class="field">Mot de passe maître</label>
+      <input id="gs-pw" type="password" placeholder="Un mot de passe fort">
+      <label class="field">Confirme le mot de passe</label>
+      <input id="gs-pw2" type="password" placeholder="Retape-le">
+      <button class="btn primary mt" id="gs-go">🔒 Chiffrer et enregistrer</button>
+      <div id="gs-err" class="small mt" style="color:var(--bad)"></div>
+      <button class="btn ghost mt" id="gen-close">Fermer</button>`);
+    document.getElementById('gs-go').onclick = genDoSetup;
+    document.getElementById('gen-close').onclick = closeSheet;
+  } else if (screen === 'unlock') {
+    openSheet(`
+      <h2>🔑 Générateur</h2>
+      <label class="field">Mot de passe maître</label>
+      <input id="gu-pw" type="password" placeholder="Ton mot de passe">
+      <button class="btn primary mt" id="gu-go">Déverrouiller</button>
+      <div id="gu-err" class="small mt" style="color:var(--bad)"></div>
+      <button class="btn danger ghost mt" id="gu-reset">Réinitialiser (effacer la clé de ce tél)</button>
+      <button class="btn ghost mt" id="gen-close">Fermer</button>`);
+    document.getElementById('gu-go').onclick = genDoUnlock;
+    document.getElementById('gu-reset').onclick = () => {
+      if (confirm('Effacer la clé chiffrée de cet appareil ?')) { localStorage.removeItem(GEN_LS); genSignKey = null; genRender('setup'); }
+    };
+    document.getElementById('gen-close').onclick = closeSheet;
+  } else {
+    openSheet(`
+      <h2>🔑 Générer une licence</h2>
+      <label class="field">Identifiant d'appareil du client</label>
+      <input id="gg-id" type="text" placeholder="XXXX-XXXX" maxlength="9" style="text-align:center;font-weight:800;letter-spacing:2px">
+      <button class="btn primary mt" id="gg-go">Générer la clé</button>
+      <div id="gg-out" class="hidden mt">
+        <label class="field">Clé à donner au client</label>
+        <div id="gg-key" style="word-break:break-all;user-select:all;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:14px;font-family:monospace;font-size:13px"></div>
+        <button class="btn ghost mt" id="gg-copy">📋 Copier la clé</button>
+        <div id="gg-ok" class="small mt" style="color:var(--ok)"></div>
+      </div>
+      <div id="gg-err" class="small mt" style="color:var(--bad)"></div>
+      <button class="btn ghost mt" id="gg-lock">🔒 Verrouiller</button>`);
+    const idIn = document.getElementById('gg-id');
+    idIn.oninput = (e) => { e.target.value = e.target.value.toUpperCase(); };
+    document.getElementById('gg-go').onclick = genDoGenerate;
+    document.getElementById('gg-lock').onclick = () => { genSignKey = null; genRender('unlock'); };
+  }
+}
+async function genDoSetup() {
+  const err = document.getElementById('gs-err'); err.textContent = '';
+  const raw = document.getElementById('gs-key').value.trim();
+  const pw = document.getElementById('gs-pw').value, pw2 = document.getElementById('gs-pw2').value;
+  let jwk;
+  try { jwk = JSON.parse(raw); } catch (e) { err.textContent = 'Clé illisible (JSON invalide).'; return; }
+  if (jwk.x !== LICENCE_PUBKEY.x || jwk.y !== LICENCE_PUBKEY.y || !jwk.d) { err.textContent = "Cette clé ne correspond pas à Voyage."; return; }
+  if (pw.length < 8) { err.textContent = 'Mot de passe : 8 caractères minimum.'; return; }
+  if (pw !== pw2) { err.textContent = 'Les deux mots de passe diffèrent.'; return; }
+  try {
+    genSignKey = await genImportSign(raw);
+    localStorage.setItem(GEN_LS, JSON.stringify(await genEncrypt(raw, pw)));
+    genRender('generate');
+  } catch (e) { err.textContent = 'Erreur : ' + e.message; }
+}
+async function genDoUnlock() {
+  const err = document.getElementById('gu-err'); err.textContent = '';
+  const v = genVault(); if (!v) { genRender('setup'); return; }
+  try {
+    genSignKey = await genImportSign(await genDecrypt(v, document.getElementById('gu-pw').value));
+    genRender('generate');
+  } catch (e) { err.textContent = 'Mot de passe incorrect.'; }
+}
+async function genDoGenerate() {
+  const err = document.getElementById('gg-err'); err.textContent = ''; document.getElementById('gg-out').classList.add('hidden');
+  const id = document.getElementById('gg-id').value.trim().toUpperCase();
+  if (!/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(id)) { err.textContent = 'Identifiant invalide. Format : XXXX-XXXX.'; return; }
+  if (!genSignKey) { genRender('unlock'); return; }
+  try {
+    document.getElementById('gg-key').textContent = await genMakeLicence(id);
+    document.getElementById('gg-out').classList.remove('hidden');
+    document.getElementById('gg-copy').onclick = async () => {
+      try { await navigator.clipboard.writeText(document.getElementById('gg-key').textContent); document.getElementById('gg-ok').textContent = 'Copié ✓'; }
+      catch (e) { document.getElementById('gg-ok').textContent = 'Sélectionne et copie la clé.'; }
+    };
+  } catch (e) { err.textContent = 'Erreur : ' + e.message; }
+}
+
+// Détecte un appui long (700 ms), souris et tactile.
+function bindLongPress(node, cb, ms) {
+  if (!node) return;
+  let t = null;
+  const start = () => { t = setTimeout(cb, ms || 700); };
+  const cancel = () => { clearTimeout(t); };
+  node.addEventListener('touchstart', start, { passive: true });
+  node.addEventListener('touchend', cancel);
+  node.addEventListener('touchmove', cancel, { passive: true });
+  node.addEventListener('mousedown', start);
+  node.addEventListener('mouseup', cancel);
+  node.addEventListener('mouseleave', cancel);
 }
 
 /* -------------------------------------------------------------------------
@@ -568,6 +700,7 @@ function renderHome() {
         : 'Débloque la version à vie (' + PRICE + ', un seul paiement) pour continuer à générer.'}</p>
     </div>`;
   }
+  html += `<p class="small muted center mt2" id="ver-foot" style="user-select:none">Voyage ${APP_VERSION}</p>`;
   view().innerHTML = html;
 
   const setup = document.getElementById('btn-setup');
@@ -575,6 +708,7 @@ function renderHome() {
   document.getElementById('btn-new').onclick = startWizard;
   const banner = document.getElementById('lic-banner');
   if (banner) banner.onclick = () => openLicenceSheet(trialLeft() === 0);
+  bindLongPress(document.getElementById('ver-foot'), openGeneratorSheet); // accès caché au générateur
   view().querySelectorAll('.trip-card').forEach(c => c.onclick = () => { route = { name: 'trip', tripId: c.dataset.id }; render(); });
 }
 function badgeClass(score) { if (score == null) return 'pending'; if (score >= 70) return 'ok'; if (score >= 40) return 'warn'; return 'pending'; }
