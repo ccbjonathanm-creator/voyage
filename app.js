@@ -10,7 +10,7 @@
 /* -------------------------------------------------------------------------
    1. STOCKAGE LOCAL
    ------------------------------------------------------------------------- */
-const APP_VERSION = 'v4';
+const APP_VERSION = 'v5';
 const STORE_KEY = 'boussole.v1';
 /* Fournisseurs d'IA supportés (BYOK : la clé de l'utilisateur, appel direct depuis le navigateur).
    Groq par défaut : free tier vraiment généreux (des milliers de requêtes/jour), rapide,
@@ -324,6 +324,7 @@ RÈGLES STRICTES (très important) :
 Réponds UNIQUEMENT en JSON valide, sans texte autour, avec EXACTEMENT cette structure :
 {
   "resume": "2 phrases qui résument l'esprit du séjour",
+  "budget_estime": "estimation prudente du budget sur place par personne, HORS vol et hôtel (ex: 'environ 250-350 € / personne pour ${n} jours : repas, visites, transports locaux')",
   "jours": [
     {
       "titre": "titre court de la journée",
@@ -387,10 +388,12 @@ async function genererVoyage(w, onStep) {
     startDate: w.startDate,
     endDate: w.endDate,
     voyageurs: w.voyageurs,
+    depart: w.depart || '',
     budget: w.budget,
     interets: w.interets,
     rythme: w.rythme,
     resume: it.resume || '',
+    budget_estime: it.budget_estime || '',
     jours: it.jours,
     weather,
     createdAt: Date.now(),
@@ -600,7 +603,7 @@ function startWizard() {
   if (!hasKey()) { toast('Configure d\'abord ta clé IA.'); route = { name: 'key', back: 'home' }; render(); return; }
   const start = todayISO();
   const end = fmtISO(addDays(parseISO(start), 3));
-  wizard = { dest: null, query: '', startDate: start, endDate: end, voyageurs: 'couple', budget: '', interets: [], rythme: 'equilibre' };
+  wizard = { dest: null, query: '', startDate: start, endDate: end, voyageurs: 'couple', depart: 'Lyon', budget: '', interets: [], rythme: 'equilibre' };
   route = { name: 'wizard' }; render();
 }
 
@@ -627,6 +630,8 @@ function renderWizard() {
       <div class="chips" id="voyageurs">
         ${['solo', 'couple', 'famille', 'amis'].map(v => `<div class="chip ${w.voyageurs === v ? 'on' : ''}" data-v="${v}">${v}</div>`).join('')}
       </div>
+      <label class="field">Ville de départ (pour les liens de vols)</label>
+      <input type="text" id="depart" placeholder="Ex: Lyon, Paris…" value="${esc(w.depart || '')}">
       <label class="field">Budget indicatif (optionnel)</label>
       <input type="text" id="budget" placeholder="Ex: 800 € pour 2, petit budget…" value="${esc(w.budget)}">
     </div>
@@ -678,6 +683,7 @@ function renderWizard() {
     majJours();
   };
   document.getElementById('end').onchange = (e) => { w.endDate = e.target.value; majJours(); };
+  document.getElementById('depart').oninput = (e) => { w.depart = e.target.value; };
   document.getElementById('budget').oninput = (e) => { w.budget = e.target.value; };
 
   bindChips('voyageurs', 'v', (v) => { w.voyageurs = v; }, false);
@@ -727,6 +733,41 @@ async function lancerGeneration() {
 const CAT_EMOJI = { visite: '👀', repas: '🍽️', activite: '🎫', transport: '🚕', hebergement: '🏨', detente: '🌿' };
 const MOMENT_LABEL = { matin: 'Matin', midi: 'Midi', 'apres-midi': 'Après-midi', soir: 'Soir' };
 
+function nbAdultes(voyageurs) {
+  if (voyageurs === 'solo') return 1;
+  if (voyageurs === 'famille' || voyageurs === 'amis') return 3;
+  return 2; // couple par défaut
+}
+
+/* Carte "Vols & hébergement" : l'app ne réserve pas, elle ouvre les vrais sites
+   avec destination, dates et voyageurs PRÉ-REMPLIS. Gratuit, aucune API, prix réels. */
+function carteReservation(t) {
+  const dest = t.dest.name;
+  const adultes = nbAdultes(t.voyageurs);
+  const depart = (t.depart || '').trim();
+
+  const gflights = 'https://www.google.com/travel/flights?q=' +
+    encodeURIComponent('vols ' + (depart ? depart + ' ' : '') + dest + ' ' + t.startDate + ' au ' + t.endDate);
+  const skyscanner = 'https://www.skyscanner.fr/transport/vols/?adults=' + adultes +
+    '&destination=' + encodeURIComponent(dest);
+  const booking = 'https://www.booking.com/searchresults.html?ss=' + encodeURIComponent(dest) +
+    '&checkin=' + t.startDate + '&checkout=' + t.endDate + '&group_adults=' + adultes;
+  const airbnb = 'https://www.airbnb.fr/s/' + encodeURIComponent(dest) + '/homes?checkin=' +
+    t.startDate + '&checkout=' + t.endDate + '&adults=' + adultes;
+
+  return `<div class="card">
+    <b>🧳 Vols & hébergement</b>
+    ${t.budget_estime ? `<p class="small mt" style="color:var(--accent2)">💶 ${esc(t.budget_estime)}</p>` : ''}
+    <p class="small muted mt">Boussole ne réserve pas à ta place : ces liens ouvrent les vrais sites avec tes dates déjà remplies. Prix réels, tu réserves toi-même.</p>
+    <div class="small muted mt">✈️ Vols${depart ? ' (depuis ' + esc(depart) + ')' : ''}</div>
+    <a class="btn mt" href="${gflights}" target="_blank" rel="noopener">Google Flights</a>
+    <a class="btn ghost mt" href="${skyscanner}" target="_blank" rel="noopener">Skyscanner</a>
+    <div class="small muted mt2">🏨 Hébergement (${adultes} voyageur(s))</div>
+    <a class="btn mt" href="${booking}" target="_blank" rel="noopener">Booking.com</a>
+    <a class="btn ghost mt" href="${airbnb}" target="_blank" rel="noopener">Airbnb</a>
+  </div>`;
+}
+
 function renderTrip() {
   const t = state.trips.find(x => x.id === route.tripId);
   if (!t) { route = { name: 'home' }; render(); return; }
@@ -750,6 +791,8 @@ function renderTrip() {
     </div>
     <p class="small muted mt">✅ vérifié sur OpenStreetMap · ⚠️ à confirmer sur place</p>` : ''}
   </div>`;
+
+  html += carteReservation(t);
 
   t.jours.forEach((j, idx) => {
     const iso = fmtISO(addDays(parseISO(t.startDate), idx));
@@ -809,7 +852,7 @@ function tripMenu(t) {
   };
   document.getElementById('m-regen').onclick = () => {
     closeSheet();
-    wizard = { dest: t.dest, query: t.dest.name, startDate: t.startDate, endDate: t.endDate, voyageurs: t.voyageurs, budget: t.budget, interets: t.interets || [], rythme: t.rythme || 'equilibre' };
+    wizard = { dest: t.dest, query: t.dest.name, startDate: t.startDate, endDate: t.endDate, voyageurs: t.voyageurs, depart: t.depart || 'Lyon', budget: t.budget, interets: t.interets || [], rythme: t.rythme || 'equilibre' };
     lancerGeneration();
   };
 }
