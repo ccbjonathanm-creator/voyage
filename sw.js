@@ -1,7 +1,7 @@
 /* Voyage — service worker : met la coquille de l'app en cache pour un fonctionnement hors-ligne.
    Les appels réseau (Gemini, Open-Meteo, OpenStreetMap) ne sont JAMAIS mis en cache :
    ce sont des données fraîches, elles partent toujours au réseau. */
-const CACHE = 'boussole-v1';
+const CACHE = 'boussole-v2';
 const ASSETS = [
   './',
   './index.html',

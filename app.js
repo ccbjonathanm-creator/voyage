@@ -13,7 +13,16 @@
 const APP_VERSION = 'v1';
 const STORE_KEY = 'boussole.v1';
 const KEY_STORE = 'boussole.geminikey'; // clé API Gemini de l'utilisateur (sur son appareil)
-const MODEL = 'gemini-2.5-flash';
+const MODEL_STORE = 'boussole.model';
+// Flash-Lite par défaut : quota gratuit bien plus généreux que 2.5-flash (qui sature vite).
+const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
+const MODELES = [
+  { id: 'gemini-2.5-flash-lite', label: 'Flash-Lite — recommandé (quota gratuit élevé)' },
+  { id: 'gemini-2.5-flash', label: 'Flash — meilleure qualité (quota plus serré)' },
+  { id: 'gemini-2.0-flash', label: '2.0 Flash — alternative' },
+];
+function getModel() { try { return localStorage.getItem(MODEL_STORE) || DEFAULT_MODEL; } catch (e) { return DEFAULT_MODEL; } }
+function setModel(m) { try { localStorage.setItem(MODEL_STORE, m || DEFAULT_MODEL); } catch (e) {} }
 
 let state = { trips: [] };
 let route = { name: 'home', tripId: null }; // home | key | wizard | trip
@@ -158,7 +167,7 @@ async function verifyLieu(nom, villeCtx) {
 async function callGemini(prompt, { json = false } = {}) {
   const key = getKey().trim();
   if (!key) throw new Error('Aucune clé Gemini enregistrée.');
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(key)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${getModel()}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: { temperature: 0.5 },
@@ -168,9 +177,14 @@ async function callGemini(prompt, { json = false } = {}) {
   try {
     res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   } catch (e) { throw new Error('Réseau indisponible.'); }
-  if (res.status === 400 || res.status === 403) throw new Error('Clé Gemini invalide ou non autorisée.');
-  if (res.status === 429) throw new Error('Quota Gemini atteint pour aujourd\'hui. Réessaie plus tard.');
-  if (!res.ok) throw new Error('Gemini a répondu ' + res.status + '.');
+  if (!res.ok) {
+    // On remonte le VRAI message de Google (sans jamais afficher la clé).
+    let detail = '';
+    try { const j = await res.json(); detail = (j && j.error && j.error.message) || ''; } catch (e) {}
+    if (res.status === 400 || res.status === 403) throw new Error('Clé refusée ou API non activée.' + (detail ? ' [' + detail + ']' : ''));
+    if (res.status === 429) throw new Error('Limite atteinte sur le modèle « ' + getModel() + ' ». Essaie le modèle Flash-Lite (menu 🔑) ou attends 1 minute.' + (detail ? ' [' + detail + ']' : ''));
+    throw new Error('Gemini a répondu ' + res.status + '.' + (detail ? ' [' + detail + ']' : ''));
+  }
   const data = await res.json();
   const txt = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
   if (!txt) throw new Error('Réponse vide de Gemini.');
@@ -179,7 +193,7 @@ async function callGemini(prompt, { json = false } = {}) {
 
 // Petit appel de validation de la clé (onboarding).
 async function testerCle(key) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(key)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${getModel()}:generateContent?key=${encodeURIComponent(key)}`;
   const res = await fetch(url, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ contents: [{ parts: [{ text: 'Réponds juste: ok' }] }] }),
@@ -395,6 +409,11 @@ function renderKey() {
       <label class="field">Ta clé Gemini</label>
       <input type="password" id="key-input" placeholder="AIza…" value="${esc(getKey())}" autocomplete="off" autocapitalize="off" spellcheck="false" />
       <label class="small muted mt" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="key-show" style="width:auto"> Afficher</label>
+      <label class="field">Modèle Gemini</label>
+      <select id="model-sel">
+        ${MODELES.map(m => `<option value="${m.id}" ${getModel() === m.id ? 'selected' : ''}>${m.label}</option>`).join('')}
+      </select>
+      <p class="small muted mt">Si tu tombes sur « quota atteint », garde Flash-Lite : c'est le plus généreux en gratuit.</p>
       <button class="btn primary mt" id="key-save">Tester et enregistrer</button>
       ${hasKey() ? '<button class="btn danger ghost mt" id="key-del">Supprimer ma clé</button>' : ''}
       <p class="small muted mt">🔒 Ta clé reste sur cet appareil (stockage local du navigateur). Elle n'est jamais envoyée ailleurs qu'à Google.</p>
@@ -402,6 +421,7 @@ function renderKey() {
 
   const input = document.getElementById('key-input');
   document.getElementById('key-show').onchange = (e) => { input.type = e.target.checked ? 'text' : 'password'; };
+  document.getElementById('model-sel').onchange = (e) => { setModel(e.target.value); };
   document.getElementById('key-save').onclick = async () => {
     const k = input.value.trim();
     if (k.length < 10) { toast('Clé trop courte.'); return; }
