@@ -10,7 +10,7 @@
 /* -------------------------------------------------------------------------
    1. STOCKAGE LOCAL
    ------------------------------------------------------------------------- */
-const APP_VERSION = 'v9';
+const APP_VERSION = 'v10';
 const STORE_KEY = 'boussole.v1';
 /* Fournisseurs d'IA supportés (BYOK : la clé de l'utilisateur, appel direct depuis le navigateur).
    Groq par défaut : free tier vraiment généreux (des milliers de requêtes/jour), rapide,
@@ -91,7 +91,7 @@ const TRIAL_APP = 'voyage';
 let trialEmail = null;
 let srvUsesLeft = null;               // null = inconnu (hors-ligne) -> fail-open
 let srvLimit = TRIAL_GENERATIONS;
-const PRICE = '5 €';
+const PRICE = '15 €';
 const PAY_URL = ''; // lien de paiement (PayPal.me / Lydia) — à renseigner par le vendeur
 const LICENCE_PUBKEY = { kty: 'EC', crv: 'P-256', x: 'YbDelKNMSemSopaa1U9TrTA5L4XpkkJ1BHoxOp2lzKo', y: '4INPqTfFNgy7wPwqS3_hy9z7kH5vGEFgcGp3pYSDWUE' };
 let licensed = false;
