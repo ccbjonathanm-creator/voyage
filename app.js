@@ -10,7 +10,7 @@
 /* -------------------------------------------------------------------------
    1. STOCKAGE LOCAL
    ------------------------------------------------------------------------- */
-const APP_VERSION = 'v8';
+const APP_VERSION = 'v9';
 const STORE_KEY = 'boussole.v1';
 /* Fournisseurs d'IA supportés (BYOK : la clé de l'utilisateur, appel direct depuis le navigateur).
    Groq par défaut : free tier vraiment généreux (des milliers de requêtes/jour), rapide,
@@ -81,8 +81,16 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
    Note assumée : l'essai local se remet à zéro si on réinstalle (limite de tout
    système sans serveur). Le déblocage payant, lui, est solide et permanent.
    ------------------------------------------------------------------------- */
-const LIC = { device: 'voyage.device', licence: 'voyage.licence', licemail: 'voyage.licemail', gencount: 'voyage.gencount' };
+const LIC = { device: 'voyage.device', licence: 'voyage.licence', licemail: 'voyage.licemail', gencount: 'voyage.gencount', trialEmail: 'voyage.trial_email' };
 const TRIAL_GENERATIONS = 2;
+// Compteur d'essais CÔTÉ SERVEUR (Worker partagé), indexé par e-mail haché.
+// But : réinstaller l'app ne redonne pas de générations gratuites.
+// Repli honnête (fail-open) : si le Worker est injoignable, on laisse passer.
+const TRIAL_WORKER = 'https://resolv-trials.contactweb71.workers.dev';
+const TRIAL_APP = 'voyage';
+let trialEmail = null;
+let srvUsesLeft = null;               // null = inconnu (hors-ligne) -> fail-open
+let srvLimit = TRIAL_GENERATIONS;
 const PRICE = '5 €';
 const PAY_URL = ''; // lien de paiement (PayPal.me / Lydia) — à renseigner par le vendeur
 const LICENCE_PUBKEY = { kty: 'EC', crv: 'P-256', x: 'YbDelKNMSemSopaa1U9TrTA5L4XpkkJ1BHoxOp2lzKo', y: '4INPqTfFNgy7wPwqS3_hy9z7kH5vGEFgcGp3pYSDWUE' };
@@ -104,12 +112,32 @@ function genDeviceId() {
   return s.slice(0, 4) + '-' + s.slice(4);
 }
 function getDeviceId() { let id = localStorage.getItem(LIC.device); if (!id) { id = genDeviceId(); localStorage.setItem(LIC.device, id); } return id; }
-function getGenCount() { return parseInt(localStorage.getItem(LIC.gencount) || '0', 10) || 0; }
-function incGenCount() { localStorage.setItem(LIC.gencount, String(getGenCount() + 1)); }
-function trialLeft() { return Math.max(0, TRIAL_GENERATIONS - getGenCount()); }
-function canGenerate() { return licensed || trialLeft() > 0; }
 // normalisation IDENTIQUE côté vérif et côté générateur
 const normEmail = (e) => (e || '').trim().toLowerCase();
+const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail(e));
+
+// --- Essai serveur ---
+function loadTrialEmail() { try { trialEmail = localStorage.getItem(LIC.trialEmail) || null; } catch (e) { trialEmail = null; } }
+function hasTrialEmail() { return !!trialEmail; }
+async function setTrialEmail(e) { trialEmail = normEmail(e); try { localStorage.setItem(LIC.trialEmail, trialEmail); } catch (_) {} await trialStatus(); }
+async function _trialApi(path) {
+  const r = await fetch(TRIAL_WORKER + path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app: TRIAL_APP, email: trialEmail })
+  });
+  if (!r.ok) throw new Error('HTTP_' + r.status);
+  return r.json();
+}
+async function trialStatus() { if (!trialEmail) return; try { const j = await _trialApi('/api/status'); srvUsesLeft = j.usesLeft; srvLimit = j.limit; } catch (e) { srvUsesLeft = null; } }
+async function trialConsume() { if (!trialEmail) return { allowed: true, offline: true }; try { const j = await _trialApi('/api/consume'); srvUsesLeft = j.usesLeft; srvLimit = j.limit; return j; } catch (e) { return { allowed: true, offline: true }; } }
+// Générations restantes pour l'affichage (hors-ligne : on montre la limite).
+function trialLeft() { return srvUsesLeft == null ? srvLimit : srvUsesLeft; }
+// Autorisé à générer ? licence OU (e-mail fourni ET (hors-ligne OU quota restant)).
+function canGenerate() {
+  if (licensed) return true;
+  if (!trialEmail) return false;           // il faut d'abord fournir un e-mail
+  return srvUsesLeft == null || srvUsesLeft > 0; // hors-ligne = fail-open
+}
 async function verifyLicence(key, email) {
   if (!key) return false;
   try {
@@ -151,6 +179,35 @@ function openLicenceSheet(essaiTermine) {
       else document.getElementById('lic-err').textContent = 'E-mail ou clé incorrects.';
     };
   }
+}
+
+// Gate e-mail bloquant au démarrage : demande l'e-mail avant d'utiliser l'app,
+// pour que réinstaller ne redonne pas d'essai. onDone() est appelé une fois l'e-mail saisi.
+function showTrialEmailGate(onDone) {
+  if (document.getElementById('trial-gate')) return;
+  const back = document.createElement('div');
+  back.id = 'trial-gate';
+  back.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(10,12,20,.72);display:flex;align-items:center;justify-content:center;padding:20px';
+  back.innerHTML = `<div class="card" style="max-width:420px;width:100%">
+    <h2>🧭 Bienvenue sur Voyage</h2>
+    <p class="small muted mt">Entre ton e-mail pour activer ton <b>essai gratuit (${TRIAL_GENERATIONS} itinéraires)</b>. Il garde ton essai même si tu réinstalles l'application.</p>
+    <label class="field">Ton e-mail</label>
+    <input type="email" id="tg-email" placeholder="ton@mail.com" autocomplete="email" autocapitalize="off" spellcheck="false">
+    <button class="btn primary mt" id="tg-go">Commencer</button>
+    <div id="tg-err" class="small mt" style="color:var(--bad)"></div>
+    <button class="btn ghost mt" id="tg-lic">J'ai déjà acheté (activer ma licence)</button>
+  </div>`;
+  document.body.appendChild(back);
+  document.getElementById('tg-go').onclick = async () => {
+    const email = document.getElementById('tg-email').value.trim();
+    const err = document.getElementById('tg-err');
+    if (!validEmail(email)) { err.textContent = 'Entre une adresse e-mail valide.'; return; }
+    err.textContent = 'Un instant…';
+    await setTrialEmail(email);
+    back.remove();
+    if (typeof onDone === 'function') onDone();
+  };
+  document.getElementById('tg-lic').onclick = () => { back.remove(); openLicenceSheet(false); };
 }
 
 /* ---- Générateur de licences intégré (accès caché : appui long sur la version) ----
@@ -935,8 +992,10 @@ async function lancerGeneration() {
   if (!w.dest) { toast('Choisis une destination dans la liste.'); return; }
   if (nbDaysInclusive(w.startDate, w.endDate) > 14) { toast('Limite-toi à 14 jours pour de bons résultats.'); return; }
 
-  // Verrou essai/licence : essai gratuit épuisé et pas de licence -> écran de déblocage.
+  // Verrou essai/licence.
   await refreshLicence();
+  if (!licensed && !hasTrialEmail()) { showTrialEmailGate(() => lancerGeneration()); return; }
+  if (!licensed) await trialStatus();               // état frais avant de décider
   if (!canGenerate()) { openLicenceSheet(true); return; }
 
   topbar().innerHTML = `<div class="title">✨ Création…</div>`;
@@ -946,7 +1005,7 @@ async function lancerGeneration() {
   try {
     const trip = await genererVoyage(w, step);
     state.trips.push(trip); save();
-    if (!licensed) incGenCount(); // l'essai ne décompte que sur une génération réussie
+    if (!licensed) await trialConsume(); // l'essai ne décompte (serveur) que sur une génération réussie
     route = { name: 'trip', tripId: trip.id }; render();
     toast('Itinéraire prêt ✅');
   } catch (e) {
@@ -1125,6 +1184,16 @@ if ('serviceWorker' in navigator) {
 document.getElementById('sheet-backdrop').addEventListener('click', closeSheet);
 
 load();
+loadTrialEmail();
 render();
-// Vérifie la licence au démarrage (async), puis rafraîchit l'accueil si l'état change.
-refreshLicence().then((ok) => { if (ok && route.name === 'home') render(); });
+// Démarrage async : licence -> gate e-mail si besoin -> état d'essai serveur.
+(async function boot() {
+  await refreshLicence();
+  if (!licensed && !hasTrialEmail()) {
+    // Ni licence, ni e-mail d'essai : on demande l'e-mail avant tout (anti-reset d'essai).
+    showTrialEmailGate(() => render());
+    return;
+  }
+  if (!licensed) await trialStatus();
+  render();
+})();
