@@ -4,7 +4,7 @@
 
 const LS_VAULT = 'voyagegen.vault';
 // Partie PUBLIQUE de la clé (pour vérifier que tu colles la bonne clé secrète).
-const PUB = { x: 'YbDelKNMSemSopaa1U9TrTA5L4XpkkJ1BHoxOp2lzKo', y: '4INPqTfFNgy7wPwqS3_hy9z7kH5vGEFgcGp3pYSDWUE' };
+const PUB = { x: 'pEqmof4mLTrlhAD5j73kprot94Jup0Bn7A0sgybOJTg', y: 'I76Z0LcxF7yShbqjcasPUv_PZS_UlJCLPIDtP_RsNrQ' };
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
