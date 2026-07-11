@@ -233,6 +233,61 @@ async function genMakeLicence(email) {
   const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, genSignKey, _enc.encode('voyage-licence:' + normEmail(email)));
   return _b64(sig);
 }
+// --- Registre des ventes (e-mail -> clé + date), gardé sur cet appareil ---
+const GEN_LEDGER = 'voyage.ledger';
+function ledgerGet() { try { return JSON.parse(localStorage.getItem(GEN_LEDGER)) || []; } catch (e) { return []; } }
+function ledgerSave(l) { localStorage.setItem(GEN_LEDGER, JSON.stringify(l)); }
+function ledgerAdd(email, key) {
+  email = normEmail(email);
+  const l = ledgerGet(); const i = l.findIndex((x) => x.email === email);
+  const e = { email, key, date: new Date().toISOString().slice(0, 10) };
+  if (i >= 0) l[i] = e; else l.push(e); ledgerSave(l);
+}
+function ledgerEsc(s) { return (s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function genRenderLedger() {
+  openSheet(`
+    <h2>📋 Registre des ventes</h2>
+    <p class="small" style="opacity:.75;margin:0 0 12px">Tes acheteurs, gardés sur cet appareil. Cherche un e-mail pour vérifier un achat et recopier sa clé.</p>
+    <input id="ld-q" type="search" placeholder="Chercher un e-mail…" autocomplete="off" style="width:100%">
+    <div id="ld-list" style="max-height:44vh;overflow:auto;margin-top:8px"></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn ghost" id="ld-exp" style="flex:1">⬇ Sauvegarder</button>
+      <button class="btn ghost" id="ld-imp" style="flex:1">⬆ Restaurer</button>
+    </div>
+    <button class="btn primary mt" id="ld-back">← Retour</button>
+    <input id="ld-file" type="file" accept=".json,application/json" class="hidden">`);
+  const $ = (id) => document.getElementById(id);
+  const render = () => {
+    const q = ($('ld-q').value || '').trim().toLowerCase();
+    const list = ledgerGet().filter((x) => !q || x.email.includes(q)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const box = $('ld-list');
+    if (!list.length) { box.innerHTML = `<p class="small" style="text-align:center;opacity:.7;padding:10px">${q ? 'Aucun e-mail ne correspond.' : "Aucune vente enregistrée pour l'instant."}</p>`; return; }
+    box.innerHTML = list.map((x, i) => `<div style="display:flex;align-items:center;gap:10px;padding:10px 2px;border-bottom:1px solid var(--line)">
+      <div style="flex:1;min-width:0"><div style="font-weight:700;word-break:break-all">${ledgerEsc(x.email)}</div><div class="small" style="opacity:.7">acheté le ${x.date || '?'}</div></div>
+      <button class="btn ghost" data-i="${i}" style="flex:none;width:auto;padding:8px 12px">Copier</button></div>`).join('');
+    box.querySelectorAll('button[data-i]').forEach((b) => b.addEventListener('click', () => {
+      const x = list[+b.dataset.i]; if (navigator.clipboard) navigator.clipboard.writeText(x.key).catch(() => {}); toast('Clé de ' + x.email + ' copiée');
+    }));
+  };
+  render();
+  $('ld-q').addEventListener('input', render);
+  $('ld-back').onclick = () => genRender('generate');
+  $('ld-exp').onclick = () => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(ledgerGet(), null, 1)], { type: 'application/json' }));
+    const a = document.createElement('a'); a.href = url; a.download = 'voyage-registre-' + new Date().toISOString().slice(0, 10) + '.json'; a.click(); URL.revokeObjectURL(url); toast('Registre sauvegardé');
+  };
+  $('ld-imp').onclick = () => $('ld-file').click();
+  $('ld-file').addEventListener('change', async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try {
+      const arr = JSON.parse(await f.text()); if (!Array.isArray(arr)) throw 0;
+      const m = new Map(ledgerGet().map((x) => [x.email, x]));
+      for (const x of arr) { if (x && x.email && x.key) { const em = normEmail(x.email); m.set(em, { email: em, key: x.key, date: x.date || '' }); } }
+      ledgerSave([...m.values()]); toast('Registre restauré'); render();
+    } catch (_) { toast('Fichier invalide'); }
+    e.target.value = '';
+  });
+}
 function openGeneratorSheet() { genSignKey = null; genRender(genVault() ? 'unlock' : 'setup'); }
 function genRender(screen) {
   if (screen === 'setup') {
@@ -277,8 +332,10 @@ function genRender(screen) {
         <div id="gg-ok" class="small mt" style="color:var(--ok)"></div>
       </div>
       <div id="gg-err" class="small mt" style="color:var(--bad)"></div>
+      <button class="btn ghost mt" id="gg-ledger">📋 Registre des ventes (${ledgerGet().length})</button>
       <button class="btn ghost mt" id="gg-lock">🔒 Verrouiller</button>`);
     document.getElementById('gg-go').onclick = genDoGenerate;
+    document.getElementById('gg-ledger').onclick = genRenderLedger;
     document.getElementById('gg-lock').onclick = () => { genSignKey = null; genRender('unlock'); };
   }
 }
@@ -311,7 +368,9 @@ async function genDoGenerate() {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) { err.textContent = 'Entre un e-mail valide.'; return; }
   if (!genSignKey) { genRender('unlock'); return; }
   try {
-    document.getElementById('gg-key').textContent = await genMakeLicence(id);
+    const key = await genMakeLicence(id);
+    ledgerAdd(id, key);
+    document.getElementById('gg-key').textContent = key;
     document.getElementById('gg-out').classList.remove('hidden');
     document.getElementById('gg-copy').onclick = async () => {
       try { await navigator.clipboard.writeText(document.getElementById('gg-key').textContent); document.getElementById('gg-ok').textContent = 'Copié ✓'; }
