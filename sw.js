@@ -1,7 +1,7 @@
 /* Voyage — service worker : met la coquille de l'app en cache pour un fonctionnement hors-ligne.
    Les appels réseau (Gemini, Open-Meteo, OpenStreetMap) ne sont JAMAIS mis en cache :
    ce sont des données fraîches, elles partent toujours au réseau. */
-const CACHE = 'boussole-v14';
+const CACHE = 'boussole-v15';
 const ASSETS = [
   './',
   './index.html',
@@ -12,6 +12,7 @@ const ASSETS = [
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
   './icons/favicon-64.png',
+  './icons/apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (e) => {
