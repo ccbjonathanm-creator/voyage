@@ -10,7 +10,7 @@
 /* -------------------------------------------------------------------------
    1. STOCKAGE LOCAL
    ------------------------------------------------------------------------- */
-const APP_VERSION = 'v11';
+const APP_VERSION = 'v12';
 const STORE_KEY = 'boussole.v1';
 /* Fournisseurs d'IA supportés (BYOK : la clé de l'utilisateur, appel direct depuis le navigateur).
    Groq par défaut : free tier vraiment généreux (des milliers de requêtes/jour), rapide,
@@ -95,6 +95,9 @@ const PRICE = '15 €';
 const PAY_URL = ''; // lien de paiement (PayPal.me / Lydia) — à renseigner par le vendeur
 const LICENCE_PUBKEY = { kty: 'EC', crv: 'P-256', x: 'pEqmof4mLTrlhAD5j73kprot94Jup0Bn7A0sgybOJTg', y: 'I76Z0LcxF7yShbqjcasPUv_PZS_UlJCLPIDtP_RsNrQ' };
 let licensed = false;
+// Voyage est GRATUITE : plus d'essai limité ni de déblocage payant.
+// Ce drapeau court-circuite toute la logique de licence/quota (code conservé mais inerte).
+const FREE_MODE = true;
 const _enc = new TextEncoder();
 const _dec = new TextDecoder();
 function _fromB64(s) { const b = atob((s || '').replace(/\s+/g, '')); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
@@ -134,6 +137,7 @@ async function trialConsume() { if (!trialEmail) return { allowed: true, offline
 function trialLeft() { return srvUsesLeft == null ? srvLimit : srvUsesLeft; }
 // Autorisé à générer ? licence OU (e-mail fourni ET (hors-ligne OU quota restant)).
 function canGenerate() {
+  if (FREE_MODE) return true;
   if (licensed) return true;
   if (!trialEmail) return false;           // il faut d'abord fournir un e-mail
   return srvUsesLeft == null || srvUsesLeft > 0; // hors-ligne = fail-open
@@ -233,61 +237,6 @@ async function genMakeLicence(email) {
   const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, genSignKey, _enc.encode('voyage-licence:' + normEmail(email)));
   return _b64(sig);
 }
-// --- Registre des ventes (e-mail -> clé + date), gardé sur cet appareil ---
-const GEN_LEDGER = 'voyage.ledger';
-function ledgerGet() { try { return JSON.parse(localStorage.getItem(GEN_LEDGER)) || []; } catch (e) { return []; } }
-function ledgerSave(l) { localStorage.setItem(GEN_LEDGER, JSON.stringify(l)); }
-function ledgerAdd(email, key) {
-  email = normEmail(email);
-  const l = ledgerGet(); const i = l.findIndex((x) => x.email === email);
-  const e = { email, key, date: new Date().toISOString().slice(0, 10) };
-  if (i >= 0) l[i] = e; else l.push(e); ledgerSave(l);
-}
-function ledgerEsc(s) { return (s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-function genRenderLedger() {
-  openSheet(`
-    <h2>📋 Registre des ventes</h2>
-    <p class="small" style="opacity:.75;margin:0 0 12px">Tes acheteurs, gardés sur cet appareil. Cherche un e-mail pour vérifier un achat et recopier sa clé.</p>
-    <input id="ld-q" type="search" placeholder="Chercher un e-mail…" autocomplete="off" style="width:100%">
-    <div id="ld-list" style="max-height:44vh;overflow:auto;margin-top:8px"></div>
-    <div style="display:flex;gap:8px;margin-top:12px">
-      <button class="btn ghost" id="ld-exp" style="flex:1">⬇ Sauvegarder</button>
-      <button class="btn ghost" id="ld-imp" style="flex:1">⬆ Restaurer</button>
-    </div>
-    <button class="btn primary mt" id="ld-back">← Retour</button>
-    <input id="ld-file" type="file" accept=".json,application/json" class="hidden">`);
-  const $ = (id) => document.getElementById(id);
-  const render = () => {
-    const q = ($('ld-q').value || '').trim().toLowerCase();
-    const list = ledgerGet().filter((x) => !q || x.email.includes(q)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    const box = $('ld-list');
-    if (!list.length) { box.innerHTML = `<p class="small" style="text-align:center;opacity:.7;padding:10px">${q ? 'Aucun e-mail ne correspond.' : "Aucune vente enregistrée pour l'instant."}</p>`; return; }
-    box.innerHTML = list.map((x, i) => `<div style="display:flex;align-items:center;gap:10px;padding:10px 2px;border-bottom:1px solid var(--line)">
-      <div style="flex:1;min-width:0"><div style="font-weight:700;word-break:break-all">${ledgerEsc(x.email)}</div><div class="small" style="opacity:.7">acheté le ${x.date || '?'}</div></div>
-      <button class="btn ghost" data-i="${i}" style="flex:none;width:auto;padding:8px 12px">Copier</button></div>`).join('');
-    box.querySelectorAll('button[data-i]').forEach((b) => b.addEventListener('click', () => {
-      const x = list[+b.dataset.i]; if (navigator.clipboard) navigator.clipboard.writeText(x.key).catch(() => {}); toast('Clé de ' + x.email + ' copiée');
-    }));
-  };
-  render();
-  $('ld-q').addEventListener('input', render);
-  $('ld-back').onclick = () => genRender('generate');
-  $('ld-exp').onclick = () => {
-    const url = URL.createObjectURL(new Blob([JSON.stringify(ledgerGet(), null, 1)], { type: 'application/json' }));
-    const a = document.createElement('a'); a.href = url; a.download = 'voyage-registre-' + new Date().toISOString().slice(0, 10) + '.json'; a.click(); URL.revokeObjectURL(url); toast('Registre sauvegardé');
-  };
-  $('ld-imp').onclick = () => $('ld-file').click();
-  $('ld-file').addEventListener('change', async (e) => {
-    const f = e.target.files[0]; if (!f) return;
-    try {
-      const arr = JSON.parse(await f.text()); if (!Array.isArray(arr)) throw 0;
-      const m = new Map(ledgerGet().map((x) => [x.email, x]));
-      for (const x of arr) { if (x && x.email && x.key) { const em = normEmail(x.email); m.set(em, { email: em, key: x.key, date: x.date || '' }); } }
-      ledgerSave([...m.values()]); toast('Registre restauré'); render();
-    } catch (_) { toast('Fichier invalide'); }
-    e.target.value = '';
-  });
-}
 function openGeneratorSheet() { genSignKey = null; genRender(genVault() ? 'unlock' : 'setup'); }
 function genRender(screen) {
   if (screen === 'setup') {
@@ -332,10 +281,8 @@ function genRender(screen) {
         <div id="gg-ok" class="small mt" style="color:var(--ok)"></div>
       </div>
       <div id="gg-err" class="small mt" style="color:var(--bad)"></div>
-      <button class="btn ghost mt" id="gg-ledger">📋 Registre des ventes (${ledgerGet().length})</button>
       <button class="btn ghost mt" id="gg-lock">🔒 Verrouiller</button>`);
     document.getElementById('gg-go').onclick = genDoGenerate;
-    document.getElementById('gg-ledger').onclick = genRenderLedger;
     document.getElementById('gg-lock').onclick = () => { genSignKey = null; genRender('unlock'); };
   }
 }
@@ -368,9 +315,7 @@ async function genDoGenerate() {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) { err.textContent = 'Entre un e-mail valide.'; return; }
   if (!genSignKey) { genRender('unlock'); return; }
   try {
-    const key = await genMakeLicence(id);
-    ledgerAdd(id, key);
-    document.getElementById('gg-key').textContent = key;
+    document.getElementById('gg-key').textContent = await genMakeLicence(id);
     document.getElementById('gg-out').classList.remove('hidden');
     document.getElementById('gg-copy').onclick = async () => {
       try { await navigator.clipboard.writeText(document.getElementById('gg-key').textContent); document.getElementById('gg-ok').textContent = 'Copié ✓'; }
@@ -803,8 +748,10 @@ function renderHome() {
   }
   html += `<button class="btn primary mt2" id="btn-new">＋ Nouvel itinéraire</button>`;
 
-  // Bandeau licence / essai
-  if (licensed) {
+  // Bandeau licence / essai (masqué : Voyage est gratuite)
+  if (FREE_MODE) {
+    // rien : aucune mention de prix ni d'essai
+  } else if (licensed) {
     html += `<p class="small muted center mt2">✓ Version à vie active. Merci !</p>`;
   } else {
     const left = trialLeft();
@@ -1051,11 +998,13 @@ async function lancerGeneration() {
   if (!w.dest) { toast('Choisis une destination dans la liste.'); return; }
   if (nbDaysInclusive(w.startDate, w.endDate) > 14) { toast('Limite-toi à 14 jours pour de bons résultats.'); return; }
 
-  // Verrou essai/licence.
-  await refreshLicence();
-  if (!licensed && !hasTrialEmail()) { showTrialEmailGate(() => lancerGeneration()); return; }
-  if (!licensed) await trialStatus();               // état frais avant de décider
-  if (!canGenerate()) { openLicenceSheet(true); return; }
+  // Verrou essai/licence désactivé : Voyage est gratuite.
+  if (!FREE_MODE) {
+    await refreshLicence();
+    if (!licensed && !hasTrialEmail()) { showTrialEmailGate(() => lancerGeneration()); return; }
+    if (!licensed) await trialStatus();               // état frais avant de décider
+    if (!canGenerate()) { openLicenceSheet(true); return; }
+  }
 
   topbar().innerHTML = `<div class="title">✨ Création…</div>`;
   view().innerHTML = `<div class="loader"><div class="spinner"></div><div class="steps" id="steps">Préparation…</div><p class="small muted">Ça prend 20 à 60 secondes.</p><p class="small muted">Modèle utilisé : <b>${esc(getModel())}</b> · app ${APP_VERSION}</p></div>`;
@@ -1064,7 +1013,7 @@ async function lancerGeneration() {
   try {
     const trip = await genererVoyage(w, step);
     state.trips.push(trip); save();
-    if (!licensed) await trialConsume(); // l'essai ne décompte (serveur) que sur une génération réussie
+    if (!FREE_MODE && !licensed) await trialConsume(); // l'essai ne décompte (serveur) que sur une génération réussie
     route = { name: 'trip', tripId: trip.id }; render();
     toast('Itinéraire prêt ✅');
   } catch (e) {
@@ -1245,8 +1194,8 @@ document.getElementById('sheet-backdrop').addEventListener('click', closeSheet);
 load();
 loadTrialEmail();
 render();
-// Démarrage async : licence -> gate e-mail si besoin -> état d'essai serveur.
-(async function boot() {
+// Démarrage async : Voyage étant gratuite, aucune vérification de licence/essai.
+if (!FREE_MODE) (async function boot() {
   await refreshLicence();
   if (!licensed && !hasTrialEmail()) {
     // Ni licence, ni e-mail d'essai : on demande l'e-mail avant tout (anti-reset d'essai).
