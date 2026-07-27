@@ -1,11 +1,12 @@
 /* Voyage — service worker : met la coquille de l'app en cache pour un fonctionnement hors-ligne.
    Les appels réseau (Gemini, Open-Meteo, OpenStreetMap) ne sont JAMAIS mis en cache :
    ce sont des données fraîches, elles partent toujours au réseau. */
-const CACHE = 'boussole-v15';
+const CACHE = 'boussole-v16';
 const ASSETS = [
   './mesure.js',
   './',
   './index.html',
+  './garde-style.js',
   './styles.css',
   './app.js',
   './manifest.webmanifest',
@@ -47,17 +48,21 @@ self.addEventListener('fetch', (e) => {
     // le cache SW sert de secours hors-ligne.
     e.respondWith(
       fetch(e.request, { cache: 'no-store' }).then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+        }
         return res;
-      }).catch(() => caches.match(e.request).then((hit) => hit || caches.match('./index.html')))
+      }).catch(() => caches.match(e.request).then((hit) => hit || (e.request.mode === 'navigate' ? caches.match('./index.html') : Response.error())))
     );
   } else {
     // Cache d'abord pour le reste (icônes) : figé.
     e.respondWith(
       caches.match(e.request).then((hit) => hit || fetch(e.request).then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+        }
         return res;
       }))
     );
